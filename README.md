@@ -15,6 +15,68 @@ This repository packages two Codex skills for long-running autonomous work with 
 
 Together, the two skills form an autonomous multiprocess management framework: a main Codex coordinator keeps final judgment and integration authority, while separate tmux Codex workers execute branch tasks in parallel.
 
+## Repository Layout
+
+```text
+.
+├── scripts/
+│   ├── install.sh
+│   └── validate.sh
+└── skills/general/
+    ├── long-running-autonomous-project-management/
+    │   ├── SKILL.md
+    │   ├── agents/openai.yaml
+    │   └── references/workflow.md
+    └── tmux-codex-parallel-workers/
+        ├── SKILL.md
+        ├── agents/openai.yaml
+        ├── references/
+        │   ├── codex-tmux-framework.zh.md
+        │   └── worker-protocol.md
+        └── scripts/
+            ├── README.md
+            ├── codex_tmux_manager.py
+            └── codex_tmux_health_supervisor.py
+```
+
+The Python scripts under `tmux-codex-parallel-workers/scripts/` are not optional examples. They are the deterministic orchestration layer used by the skill.
+
+## Core Scripts
+
+### `codex_tmux_manager.py`
+
+Main tmux Codex worker manager. It provides commands to initialize state, launch workers, send or interrupt prompts, start consultation windows, start normal and health supervisors, track background jobs, resume workers, collect reports, and maintain the coordinator schedule document.
+
+Typical command:
+
+```bash
+MANAGER="${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py"
+
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers init --cwd "$PWD"
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers launch worker-a --cwd "$PWD" --task "Do one bounded branch task and report back."
+```
+
+### `codex_tmux_health_supervisor.py`
+
+Low-level health supervisor used by the manager's `start-health-supervisor` command. It monitors tmux Codex panes for recoverable transport/subprocess failures and sends a bounded continuation prompt when a pane is stuck.
+
+Typical direct dry-run:
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_health_supervisor.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  --once --dry-run
+```
+
+Prefer invoking it through the manager for real long-running use:
+
+```bash
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-health-supervisor --interval 30
+```
+
+See [the script README](skills/general/tmux-codex-parallel-workers/scripts/README.md) for the command inventory and operational notes.
+
 ## Requirements
 
 - Codex CLI available as `codex`
