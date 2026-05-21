@@ -162,16 +162,3 @@ tmux attach -t codex-workers
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
-
-## Publishing Notes
-
-Recommended first GitHub publish flow:
-
-```bash
-git init
-git add .
-git commit -m "Add autonomous multiprocess Codex skills"
-git branch -M main
-git remote add origin git@github.com:<owner>/<repo>.git
-git push -u origin main
-```
