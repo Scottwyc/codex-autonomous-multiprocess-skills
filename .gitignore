@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+
+# Runtime state produced when these skills are used inside a project.
+.codex/tmux-workers/
+
+# Local packaging scratch space.
+dist/
+tmp/
+
