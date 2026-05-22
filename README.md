@@ -88,6 +88,15 @@ README updates should name the feature, explain why it matters, and include a mi
   |           |-- git-worktrees/<worker>/  -> optional isolated git worktrees
 ```
 
+窗口组织规则：
+
+- `codex-workers` 是统一管理用的 tmux session，不是把所有 worker 塞进同一个 pane。
+- 每个 worker、consult、supervisor、recovered main coordinator 都使用稳定命名的独立 tmux window，例如 `cw-exp-a`、`cw-consult`、`cw-main-recovered-...`。
+- manager 默认用 `tmux new-window -d` 创建窗口，因此启动 worker、supervisor 或恢复主进程时不会抢占你当前正在查看的 tmux window。
+- 查看窗口列表：`tmux list-windows -t codex-workers`。
+- 进入总 session：`tmux attach -t codex-workers`，再用 tmux window 选择器切到目标窗口。
+- 已在 tmux 内时可直接切换：`tmux switch-client -t codex-workers:cw-exp-a`。
+
 主进程只把适合并行的支线拆给 worker。任何最终合并、实验结论、代码接受、指标判断，都必须由主进程复核。
 
 对于复杂实验线，推荐层级化：
@@ -454,7 +463,25 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 #### 4.2 interactive worker
 
-适合长时间任务、需要后续指令的任务、需要 supervisor 查询的任务，以及用户希望直接在 tmux 里看到 Codex worker 操作过程的任务。interactive worker 使用 `--no-alt-screen`，所以 Codex 的计划、命令、诊断和输出会留在 tmux window 的 scrollback 里。
+适合长时间任务、需要后续指令的任务、需要 supervisor 查询的任务，以及用户希望直接在 tmux 里看到 Codex worker 操作过程的任务。interactive worker 默认使用 Codex 标准 alternate-screen TUI，这能稳定保留底部输入栏、`working` 状态行和完整交互体验。
+
+如果确实需要 inline scrollback，可以显式加 `--inline-tui`，manager 才会向 Codex 传入 `--no-alt-screen`。不要把 inline TUI 作为可观察 worker 的默认模式，因为它可能导致底部 prompt/status 行显示异常。
+
+如果某个旧 worker 已经以 inline TUI 启动，并出现底部提示词、输入栏或 `working` 状态行消失，按下面方式重开该 worker：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  stop <worker>
+
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  resume <worker> --mode interactive
+```
+
+如果是主进程窗口本身需要重开，应先确保已经 `register-coordinator`，再用 `recover-coordinator --kill-old` 从 durable state 开一个新的主进程窗口。
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
@@ -508,10 +535,13 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 用户查看方式：
 
 ```bash
+tmux list-windows -t codex-workers
 tmux attach -t codex-workers
+# 如果已经在 tmux 内：
+tmux switch-client -t codex-workers:cw-exp-a
 ```
 
-然后切换到 `cw-exp-a` 这样的 worker window。
+manager 创建 worker window 时默认 detached，不会自动把当前 tmux client 切到新窗口。进入 `codex-workers` 后切换到 `cw-exp-a` 这样的 worker window 即可。
 
 #### 4.4 branch-manager worker
 

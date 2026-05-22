@@ -41,7 +41,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - TensorBoard/dashboard workers should bind to `127.0.0.1` by default, use a coordinator-approved port, and register that port as a resource or job/progress entry.
 5. Capture and review worker output before acting on it.
    - Treat worker changes as untrusted until inspected by the coordinator.
-   - For experiment execution that the user should be able to watch, use `--worker-kind autonomous-experiment` or `--mode interactive`; this opens a visible Codex worker session in tmux with `--no-alt-screen`.
+   - For experiment execution that the user should be able to watch, use `--worker-kind autonomous-experiment` or `--mode interactive`; this opens a visible Codex worker session in tmux with the normal alternate-screen TUI so the bottom prompt/status line remains stable.
    - `exec` workers are suitable for bounded one-shot tasks, but they are not the preferred mode when the user wants to observe the worker's reasoning and command sequence live.
 6. Protect the coordinator context budget.
    - Worker-facing chat, progress files, report excerpts, supervisor captures, and consultation answers must be concise by default.
@@ -332,9 +332,12 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 The script defaults to:
 
 - tmux session: `codex-workers`
+- tmux window creation: detached `tmux new-window -d`, so launching/resuming workers, consultation windows, supervisors, and recovered coordinators does not switch the user's current tmux view
+- stable tmux targets: each worker has its own named window such as `codex-workers:cw-exp-a`; inspect with `tmux list-windows -t codex-workers`, attach with `tmux attach -t codex-workers`, or switch from inside tmux with `tmux switch-client -t codex-workers:<window>`
 - state directory: `.codex/tmux-workers`
 - worker mode: `codex exec`
-- autonomous experiment worker mode: `codex --no-alt-screen` interactive TUI in tmux
+- autonomous experiment worker mode: normal Codex alternate-screen interactive TUI in tmux, preserving the bottom prompt/status line
+- optional inline TUI: pass `--inline-tui` only when preserving terminal scrollback is more important than a stable bottom prompt/status line; this forwards Codex `--no-alt-screen`
 - worker model: `gpt-5.5`
 - worker reasoning effort: `xhigh`
 - sandbox: `danger-full-access` for launched/resumed workers in this environment, because the user authorized YOLO-style autonomous experiment workers and `workspace-write` caused read-only `.codex` mounts plus blocked SSH for visible experiment branches
@@ -392,12 +395,15 @@ Use `--worker-kind autonomous-experiment` for a worker that should independently
 This worker type is designed for visibility:
 
 - it defaults to `interactive`, so the worker's Codex session is visible in its tmux window
-- it uses `--no-alt-screen`, preserving scrollback
+- it defaults to the normal Codex alternate-screen TUI so the bottom prompt/status line and `working` indicator stay visible
+- `--inline-tui` is opt-in and may make the bottom prompt/status line less reliable
 - it prints a tmux attach hint after launch
 - its prompt tells the worker to briefly state major intent before important actions
 - long training/evaluation commands should be background jobs registered with `job-add`, while the visible Codex pane remains the place where the worker inspects logs, diagnoses failures, explains decisions, and updates progress/report
 
 The coordinator should still assign explicit `--owned-path` and `--resource` tokens. The worker may iterate inside its assigned experiment branch, but final acceptance, merging, promotion, and user-facing conclusions remain coordinator-owned.
+
+If an older worker was launched with inline TUI and its bottom prompt/status line is missing, restart it through durable state: `stop <worker>` then `resume <worker> --mode interactive` without `--inline-tui`. For the main coordinator pane, prefer `recover-coordinator --kill-old` after `register-coordinator` has written a durable handoff.
 
 ## Coordinator Schedule Pattern
 

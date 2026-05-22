@@ -759,6 +759,18 @@ def ensure_session(session: str, cwd: Path) -> None:
     tmux("new-session", "-d", "-s", session, "-n", "manager", "-c", str(cwd))
 
 
+def new_tmux_window(session: str, window: str, cwd: Path, command: str) -> None:
+    # Detached window creation keeps attached tmux clients on their current window.
+    tmux("new-window", "-d", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+
+
+def print_window_access(session: str, window: str) -> None:
+    print(f"window={session}:{window}")
+    print(f"windows=tmux list-windows -t {session}")
+    print(f"attach=tmux attach -t {session}  # then select window {window}")
+    print(f"switch=tmux switch-client -t {session}:{window}  # from inside tmux")
+
+
 def window_exists(session: str, window: str) -> bool:
     listed = tmux("list-windows", "-t", session, "-F", "#{window_name}", check=False)
     if listed.returncode != 0:
@@ -1589,6 +1601,7 @@ def codex_command(
     sandbox: str,
     approval: str,
     search: bool,
+    inline_tui: bool = False,
 ) -> str:
     base = ["codex"]
     if model:
@@ -1609,7 +1622,7 @@ def codex_command(
         base.append("--search")
     if mode == "exec":
         base.append("exec")
-    if mode == "interactive":
+    if mode == "interactive" and inline_tui:
         base.append("--no-alt-screen")
 
     # The local shell wraps `codex` with --dangerously-bypass-approvals-and-sandbox.
@@ -1869,6 +1882,7 @@ def cmd_recover_coordinator(args: argparse.Namespace) -> None:
     sandbox = args.sandbox or coordinator.get("sandbox") or "danger-full-access"
     approval = args.approval or coordinator.get("approval") or "never"
     search = bool(args.search or coordinator.get("search"))
+    inline_tui = bool(args.inline_tui or coordinator.get("inline_tui"))
 
     handoff = write_coordinator_handoff(base, registry, reason)
     prompt_file = base / "tasks" / f"main-coordinator.recovery.{timestamp_slug()}.md"
@@ -1937,8 +1951,9 @@ Key files:
         sandbox=sandbox,
         approval=approval,
         search=search,
+        inline_tui=inline_tui,
     )
-    tmux("new-window", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+    new_tmux_window(session, window, cwd, command)
     target = f"{session}:{window}"
     tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
     time.sleep(args.startup_wait)
@@ -1970,6 +1985,7 @@ Key files:
             "sandbox": sandbox,
             "approval": approval,
             "search": search,
+            "inline_tui": inline_tui,
             "handoff_file": str(handoff),
             "prompt_file": str(prompt_file),
             "status_file": str(status_file),
@@ -1993,7 +2009,7 @@ Key files:
     print(f"recovered_coordinator={target}")
     print(f"prompt={prompt_file}")
     print(f"handoff={handoff}")
-    print(f"attach=tmux attach -t {session}  # then switch to window {window}")
+    print_window_access(session, window)
 
 
 def cmd_launch(args: argparse.Namespace) -> None:
@@ -2145,8 +2161,9 @@ def cmd_launch(args: argparse.Namespace) -> None:
         sandbox=args.sandbox,
         approval=args.approval,
         search=args.search,
+        inline_tui=args.inline_tui,
     )
-    tmux("new-window", "-t", args.session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+    new_tmux_window(args.session, window, cwd, command)
     target = f"{args.session}:{window}"
     if mode == "interactive":
         tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
@@ -2188,6 +2205,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
         "model": model,
         "reasoning_effort": reasoning_effort,
         "best_model_default": not args.no_best_model,
+        "inline_tui": args.inline_tui,
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
@@ -2207,7 +2225,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
     if parent_worker:
         print(f"parent_worker={parent_worker}")
     print(f"mode={mode}")
-    print(f"attach=tmux attach -t {args.session}  # then switch to window {window}")
+    print_window_access(args.session, window)
     print(f"log={log_file}")
     print(f"progress={docs['progress']}")
     print(f"report={docs['report']}")
@@ -2658,11 +2676,12 @@ def start_supervisor_window(
         print(f"supervisor already present at {session}:{window}")
         return
     command = supervisor_command(base, session, interval, ask, lines, query_interval, refresh_schedule_interval, progress_append_interval)
-    tmux("new-window", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+    new_tmux_window(session, window, cwd, command)
     append_manager_log(base, f"start-supervisor session={session} window={window} interval={interval} ask={ask}")
     append_schedule_event(base, "start-supervisor", detail=f"Started supervisor at {session}:{window} interval={interval} ask={ask}")
     refresh_schedule_doc(base, load_registry(base))
     print(f"supervisor started at {session}:{window}")
+    print_window_access(session, window)
 
 
 def cmd_start_supervisor(args: argparse.Namespace) -> None:
@@ -2728,7 +2747,7 @@ def start_health_supervisor_window(
         escape_after,
         recovery_prompt,
     )
-    tmux("new-window", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+    new_tmux_window(session, window, cwd, command)
     append_manager_log(
         base,
         f"start-health-supervisor session={session} window={window} interval={interval} "
@@ -2750,6 +2769,7 @@ def start_health_supervisor_window(
     )
     refresh_schedule_doc(base, load_registry(base))
     print(f"health supervisor started at {session}:{window}")
+    print_window_access(session, window)
 
 
 def cmd_start_health_supervisor(args: argparse.Namespace) -> None:
@@ -2827,6 +2847,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     write_text(status_file, json.dumps({"state": "resuming", "resumed_at": now_iso()}, ensure_ascii=False) + "\n")
     mode = args.mode or worker.get("mode", "exec")
     model, reasoning_effort = resolve_model_settings(args)
+    inline_tui = bool(args.inline_tui or worker.get("inline_tui"))
     command = codex_command(
         mode=mode,
         cwd=cwd,
@@ -2840,8 +2861,9 @@ def cmd_resume(args: argparse.Namespace) -> None:
         sandbox=args.sandbox or "workspace-write",
         approval=args.approval or "never",
         search=args.search,
+        inline_tui=inline_tui,
     )
-    tmux("new-window", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+    new_tmux_window(session, window, cwd, command)
     target = f"{session}:{window}"
     if mode == "interactive":
         tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(worker['log_file']))}")
@@ -2853,6 +2875,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     worker["model"] = model
     worker["reasoning_effort"] = reasoning_effort
     worker["best_model_default"] = not args.no_best_model
+    worker["inline_tui"] = inline_tui
     worker["updated_at"] = now_iso()
     worker["resume_prompt_file"] = str(prompt_file)
     worker.pop("stopped_at", None)
@@ -2864,6 +2887,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     append_schedule_event(base, "resume", worker=worker["name"], detail=f"Resumed worker at {session}:{window}")
     refresh_schedule_doc(base, registry)
     print(f"resumed {worker['name']} at {session}:{window}")
+    print_window_access(session, window)
 
 
 def worker_report_tail(worker: dict[str, Any], key: str, lines: int) -> str:
@@ -3155,8 +3179,9 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
         sandbox=args.sandbox,
         approval=args.approval,
         search=args.search,
+        inline_tui=args.inline_tui,
     )
-    tmux("new-window", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+    new_tmux_window(session, window, cwd, command)
     target = f"{session}:{window}"
     tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
     write_text(status_file, json.dumps({"state": "running", "started_at": now_iso()}, ensure_ascii=False) + "\n")
@@ -3175,6 +3200,7 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
         "reasoning_effort": reasoning_effort,
         "sandbox": args.sandbox,
         "approval": args.approval,
+        "inline_tui": args.inline_tui,
         "best_model_default": not args.no_best_model,
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -3195,6 +3221,7 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
         "Stay read-only, answer compactly by default, and wait for user questions.",
     )
     print(f"consult worker started at {target}")
+    print_window_access(session, window)
     print(f"context={consult_context_path(base)}")
     print(f"schedule={schedule_doc_path(base)}")
     print(f"log={log_file}")
@@ -3328,6 +3355,7 @@ def build_parser() -> argparse.ArgumentParser:
     recover_coord.add_argument("--sandbox", default=None)
     recover_coord.add_argument("--approval", default=None)
     recover_coord.add_argument("--search", action="store_true")
+    recover_coord.add_argument("--inline-tui", action="store_true", help="Pass Codex --no-alt-screen for inline TUI. Default keeps normal alternate-screen TUI so the bottom prompt/status line stays stable.")
     recover_coord.set_defaults(func=cmd_recover_coordinator)
 
     launch = sub.add_parser("launch", help="Launch a Codex worker in a new tmux window.")
@@ -3357,6 +3385,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--sandbox", default="danger-full-access")
     launch.add_argument("--approval", default="never")
     launch.add_argument("--search", action="store_true")
+    launch.add_argument("--inline-tui", action="store_true", help="Pass Codex --no-alt-screen for inline TUI. Default keeps normal alternate-screen TUI so the bottom prompt/status line stays stable.")
     launch.add_argument("--start-supervisor", action="store_true", help="Start a tmux supervisor window after launch.")
     launch.add_argument("--no-start-supervisor", action="store_true", help="Do not auto-start supervisor for autonomous-experiment workers.")
     launch.add_argument("--supervisor-interval", type=int, default=300)
@@ -3494,6 +3523,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--sandbox", default="danger-full-access")
     resume.add_argument("--approval", default="never")
     resume.add_argument("--search", action="store_true")
+    resume.add_argument("--inline-tui", action="store_true", help="Pass Codex --no-alt-screen for inline TUI when resuming. Default keeps normal alternate-screen TUI.")
     resume.set_defaults(func=cmd_resume)
 
     collect = sub.add_parser("collect", help="Write a coordinator summary from workers, jobs, reports, and git diffs.")
@@ -3544,6 +3574,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_consult.add_argument("--sandbox", default="read-only")
     start_consult.add_argument("--approval", default="never")
     start_consult.add_argument("--search", action="store_true")
+    start_consult.add_argument("--inline-tui", action="store_true", help="Pass Codex --no-alt-screen for inline TUI. Default keeps normal alternate-screen TUI.")
     start_consult.set_defaults(func=cmd_start_consult)
 
     consult_sync = sub.add_parser("consult-sync", help="Refresh consultation context and optionally notify the consultation worker.")

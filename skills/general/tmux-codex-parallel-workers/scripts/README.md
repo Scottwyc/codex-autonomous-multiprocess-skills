@@ -10,6 +10,8 @@ Responsibilities:
 
 - initialize a project-local worker state directory
 - launch `codex exec` or interactive Codex workers in tmux windows
+- create tmux windows detached by default, so launching workers or supervisors does not switch the user's current tmux view
+- use normal Codex alternate-screen TUI for interactive workers by default; `--inline-tui` is opt-in for forwarding Codex `--no-alt-screen`
 - support visible `autonomous-experiment` workers
 - support subordinate `branch-manager` workers for major branches
 - write manager-mediated `peer-send` messages between workers
@@ -64,11 +66,23 @@ python "$MANAGER" \
   --worker-kind autonomous-experiment \
   --task "Run one bounded child experiment and report evidence paths."
 
+tmux list-windows -t codex-workers
+tmux attach -t codex-workers
+# From inside tmux:
+tmux switch-client -t codex-workers:cw-child-a
+
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
   peer-send child-a child-b \
   --message "Child A produced artifact path results/child-a/metrics.json for Child B to inspect." \
   --notify
+```
+
+If an older interactive worker was launched with inline TUI and the bottom Codex prompt/status line is missing, restart that worker from durable state:
+
+```bash
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers stop child-a
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers resume child-a --mode interactive
 ```
 
 Common commands:
