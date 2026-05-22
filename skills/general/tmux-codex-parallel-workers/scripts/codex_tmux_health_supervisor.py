@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SESSION = "codex-workers"
+DEFAULT_SESSION = "cw"
 DEFAULT_STATE_DIR = ".codex/tmux-workers"
 MANAGER_PATH = Path(__file__).resolve().with_name("codex_tmux_manager.py")
 DEFAULT_ERROR_PATTERNS = [
@@ -486,7 +486,7 @@ def main() -> int:
     parser.add_argument("--stable-seconds", type=int, default=20)
     parser.add_argument("--cooldown", type=int, default=120)
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--allow-foreground-loop", action="store_true", help="Allow loop mode outside a managed tmux window.")
+    parser.add_argument("--allow-foreground-loop", action="store_true", help="Allow loop mode outside a managed tmux target.")
     parser.add_argument("--no-workers", action="store_true", help="Do not monitor workers from workers.json.")
     parser.add_argument("--no-coordinator", action="store_true", help="Do not monitor the registered main coordinator target from workers.json.")
     parser.add_argument("--watch-target", action="append", help="Extra interactive Codex target to auto-recover, as NAME=TMUX_TARGET.")

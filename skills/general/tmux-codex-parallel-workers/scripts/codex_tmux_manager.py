@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Codex workers running in tmux windows."""
+"""Manage Codex workers running in tmux sessions/targets."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SESSION = "codex-workers"
+DEFAULT_SESSION = "cw"
 DEFAULT_STATE_DIR = ".codex/tmux-workers"
 DEFAULT_WORKER_MODEL = os.environ.get("CODEX_WORKER_DEFAULT_MODEL", "gpt-5.5")
 DEFAULT_WORKER_REASONING = os.environ.get("CODEX_WORKER_DEFAULT_REASONING", "xhigh")
@@ -53,6 +53,30 @@ def safe_name(name: str) -> str:
     if not cleaned:
         raise SystemExit("Worker name must contain at least one alphanumeric character.")
     return cleaned[:48]
+
+
+def safe_tmux_session_name(name: str, max_len: int = 80) -> str:
+    lowered = name.strip().lower()
+    cleaned = re.sub(r"[^a-z0-9_.-]+", "-", lowered).strip("-")
+    if not cleaned:
+        raise SystemExit("tmux session name must contain at least one alphanumeric character.")
+    if len(cleaned) <= max_len:
+        return cleaned
+    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"{cleaned[: max_len - 9].rstrip('-')}-{digest}"
+
+
+def worker_session_name(namespace: str, worker_name: str) -> str:
+    return safe_tmux_session_name(f"{namespace}-{worker_name}")
+
+
+def role_session_name(namespace: str, role: str) -> str:
+    return safe_tmux_session_name(f"{namespace}-{role}")
+
+
+def strip_namespace_prefix(namespace: str, suffix: str) -> str:
+    prefix = f"{safe_tmux_session_name(namespace)}-"
+    return suffix[len(prefix) :] if suffix.startswith(prefix) else suffix
 
 
 def state_dir(path: str | None) -> Path:
@@ -638,7 +662,7 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
                 f"- Current target: `{target or '-'}`",
                 f"- Target state: `{'running' if target and tmux_target_present(target) else 'not-present'}`",
                 f"- Working directory: `{coordinator.get('cwd', '-')}`",
-                f"- Recovery window prefix: `{coordinator.get('restart_window_prefix', 'cw-main-recovered')}`",
+                f"- Recovery session suffix: `{coordinator.get('restart_window_prefix', 'main-recovered')}`",
                 f"- Model/reasoning: `{coordinator.get('model', '-')}/{coordinator.get('reasoning_effort', '-')}`",
                 f"- Registered at: {coordinator.get('registered_at', '-')}",
                 f"- Last recovery at: {coordinator.get('last_recovery_at', '-')}",
@@ -759,15 +783,53 @@ def ensure_session(session: str, cwd: Path) -> None:
     tmux("new-session", "-d", "-s", session, "-n", "manager", "-c", str(cwd))
 
 
+def session_exists(session: str) -> bool:
+    return tmux("has-session", "-t", session, check=False).returncode == 0
+
+
+def unique_session_name(namespace: str, suffix: str) -> str:
+    base = safe_tmux_session_name(f"{namespace}-{suffix}")
+    if not session_exists(base):
+        return base
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = safe_tmux_session_name(f"{base}-{stamp}")
+    if not session_exists(candidate):
+        return candidate
+    for index in range(2, 100):
+        candidate = safe_tmux_session_name(f"{base}-{stamp}-{index}")
+        if not session_exists(candidate):
+            return candidate
+    raise SystemExit(f"Cannot allocate a free tmux session name for prefix: {base}")
+
+
 def new_tmux_window(session: str, window: str, cwd: Path, command: str) -> None:
     # Detached window creation keeps attached tmux clients on their current window.
     tmux("new-window", "-d", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
 
 
+def start_tmux_target(session: str, window: str, cwd: Path, command: str, *, independent_session: bool) -> None:
+    if independent_session and not session_exists(session):
+        tmux("new-session", "-d", "-s", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+        return
+    ensure_session(session, cwd)
+    new_tmux_window(session, window, cwd, command)
+
+
+def stop_tmux_target(session: str, window: str, *, independent_session: bool) -> subprocess.CompletedProcess[str]:
+    if independent_session:
+        return tmux("kill-session", "-t", session, check=False)
+    return tmux("kill-window", "-t", f"{session}:{window}", check=False)
+
+
+def target_mode(record: dict[str, Any] | None) -> str:
+    return str((record or {}).get("session_mode") or "shared")
+
+
 def print_window_access(session: str, window: str) -> None:
-    print(f"window={session}:{window}")
+    print(f"target={session}:{window}")
+    print(f"session={session}")
+    print(f"attach=tmux attach -t {session}")
     print(f"windows=tmux list-windows -t {session}")
-    print(f"attach=tmux attach -t {session}  # then select window {window}")
     print(f"switch=tmux switch-client -t {session}:{window}  # from inside tmux")
 
 
@@ -805,7 +867,7 @@ def unique_window_name(session: str, prefix: str) -> str:
         candidate = safe_name(f"{base}-{stamp}-{index}")
         if not window_exists(session, candidate):
             return candidate
-    raise SystemExit(f"Cannot allocate a free tmux window name for prefix: {prefix}")
+    raise SystemExit(f"Cannot allocate a free tmux window name for shared-session prefix: {prefix}")
 
 
 def send_prompt(
@@ -944,7 +1006,8 @@ def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
 
 def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
     workers = registry.get("workers", {})
-    session = registry.get("session", DEFAULT_SESSION)
+    session = registry.get("session_namespace") or registry.get("session", DEFAULT_SESSION)
+    session_mode = registry.get("session_mode", "independent")
     mission = registry.get("mission", "未设置。使用 schedule-note 或 init --mission 记录当前总目标。")
     consult = registry.get("consult") or {}
     coordinator = registry.get("coordinator") or {}
@@ -953,7 +1016,8 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
         "",
         f"更新时间：{now_iso()}",
         f"State dir：`{base}`",
-        f"tmux session：`{session}`",
+        f"tmux namespace：`{session}`",
+        f"tmux topology：`{session_mode}`",
         f"默认 worker 模型：`{registry.get('default_worker_model', DEFAULT_WORKER_MODEL)}`",
         f"默认 reasoning effort：`{registry.get('default_worker_reasoning', DEFAULT_WORKER_REASONING)}`",
         "上下文预算：调度文档只保留摘要和证据路径；完整日志、长输出、完整 diff 和 tmux transcript 保存在对应 artifact/log/capture 文件中。",
@@ -971,7 +1035,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
                 f"- 当前主进程 target：`{coord_target or '-'}`",
                 f"- target 状态：`{coord_state}`",
                 f"- 工作目录：`{coordinator.get('cwd', '-')}`",
-                f"- 恢复窗口前缀：`{coordinator.get('restart_window_prefix', 'cw-main-recovered')}`",
+                f"- 恢复 session 后缀：`{coordinator.get('restart_window_prefix', 'main-recovered')}`",
                 f"- model：`{coordinator.get('model', '-')}`",
                 f"- reasoning effort：`{coordinator.get('reasoning_effort', '-')}`",
                 f"- 接管 handoff：`{coordinator.get('handoff_file', coordinator_handoff_path(base))}`",
@@ -1022,7 +1086,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
                 f"- reasoning effort：`{consult.get('reasoning_effort', '-')}`",
                 f"- 咨询上下文：`{consult.get('context_file', consult_context_path(base))}`",
                 f"- 日志：`{consult.get('log_file', consult_log_path(base))}`",
-                f"- 连接命令：`tmux attach -t {consult_session}`，然后切换到 `{consult_window or 'cw-consult'}` 窗口",
+                f"- 连接命令：`tmux attach -t {consult_session}`",
             ]
         )
         if consult.get("stopped_at"):
@@ -1044,7 +1108,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             f"- 查看统一约束：`python {MANAGER_PATH} --state-dir {base} constraints --print`",
             f"- 查看主进程接管 handoff：`{coordinator_handoff_path(base)}`",
             f"- 汇总收口：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
-            f"- 连接 tmux：`tmux attach -t {session}`",
+            f"- 查看相关 tmux session：`tmux ls | rg '^{session}(-|:)'`",
             "",
         ]
     )
@@ -1772,10 +1836,13 @@ def cmd_init(args: argparse.Namespace) -> None:
     require_binary("codex")
     base = state_dir(args.state_dir)
     cwd = Path(args.cwd).expanduser().resolve()
-    ensure_session(args.session, cwd)
+    if args.shared_session:
+        ensure_session(args.session, cwd)
     constraints_file = ensure_constraints_doc(base)
     registry = load_registry(base)
     registry["session"] = args.session
+    registry["session_namespace"] = args.session
+    registry["session_mode"] = "shared" if args.shared_session else "independent"
     registry["state_dir"] = str(base)
     registry["default_worker_model"] = DEFAULT_WORKER_MODEL
     registry["default_worker_reasoning"] = DEFAULT_WORKER_REASONING
@@ -1784,10 +1851,11 @@ def cmd_init(args: argparse.Namespace) -> None:
     registry.setdefault("workers", {})
     registry["updated_at"] = now_iso()
     save_registry(base, registry)
-    append_manager_log(base, f"init session={args.session} cwd={cwd}")
-    append_schedule_event(base, "init", detail=f"Initialized session {args.session} at {cwd}")
+    append_manager_log(base, f"init namespace={args.session} mode={registry['session_mode']} cwd={cwd}")
+    append_schedule_event(base, "init", detail=f"Initialized tmux namespace {args.session} mode={registry['session_mode']} at {cwd}")
     schedule_path = refresh_schedule_doc(base, registry)
-    print(f"session={args.session}")
+    print(f"session_namespace={args.session}")
+    print(f"session_mode={registry['session_mode']}")
     print(f"state_dir={base}")
     print(f"constraints={constraints_file}")
     print(f"schedule={schedule_path}")
@@ -1808,6 +1876,8 @@ def cmd_register_coordinator(args: argparse.Namespace) -> None:
     model, reasoning_effort = resolve_model_settings(args)
     registry = load_registry(base)
     registry["session"] = args.session
+    registry["session_namespace"] = args.session
+    registry["session_mode"] = "shared" if args.shared_session else "independent"
     registry["state_dir"] = str(base)
     registry["default_worker_model"] = DEFAULT_WORKER_MODEL
     registry["default_worker_reasoning"] = DEFAULT_WORKER_REASONING
@@ -1818,6 +1888,8 @@ def cmd_register_coordinator(args: argparse.Namespace) -> None:
         "role": "main-coordinator",
         "target": target,
         "session": args.session,
+        "session_namespace": args.session,
+        "session_mode": registry["session_mode"],
         "cwd": str(cwd),
         "restart_window_prefix": safe_name(args.restart_window_prefix),
         "model": model,
@@ -1861,15 +1933,23 @@ def cmd_recover_coordinator(args: argparse.Namespace) -> None:
     if not coordinator and not args.cwd:
         raise SystemExit("No registered coordinator found. Run register-coordinator first or pass --cwd for manual recovery.")
     cwd = Path(args.cwd or coordinator.get("cwd", os.getcwd())).expanduser().resolve()
-    session = args.session or coordinator.get("session", DEFAULT_SESSION)
-    ensure_session(session, cwd)
+    namespace = args.session or coordinator.get("session_namespace") or registry.get("session_namespace") or registry.get("session") or DEFAULT_SESSION
+    shared_session = bool(args.shared_session)
     old_target = args.old_target or coordinator.get("target", "")
     reason = args.reason or "manual-recovery"
-    window = safe_name(args.window) if args.window else unique_window_name(session, coordinator.get("restart_window_prefix", "cw-main-recovered"))
-    if window_exists(session, window):
+    if shared_session:
+        session = namespace
+        ensure_session(session, cwd)
+        window = safe_name(args.window) if args.window else unique_window_name(session, coordinator.get("restart_window_prefix", "main-recovered"))
+    else:
+        recovery_prefix = strip_namespace_prefix(namespace, coordinator.get("restart_window_prefix", "main-recovered"))
+        suffix = safe_name(args.window) if args.window else safe_name(f"{recovery_prefix}-{timestamp_slug()}")
+        session = unique_session_name(namespace, suffix)
+        window = "codex"
+    if (shared_session and window_exists(session, window)) or ((not shared_session) and session_exists(session)):
         if not args.force:
-            raise SystemExit(f"tmux window already exists: {session}:{window}; use --force to replace it")
-        tmux("kill-window", "-t", f"{session}:{window}", check=False)
+            raise SystemExit(f"tmux target already exists: {session}:{window}; use --force to replace it")
+        stop_tmux_target(session, window, independent_session=not shared_session)
         time.sleep(0.5)
 
     model = args.model if args.model is not None else coordinator.get("model")
@@ -1924,7 +2004,7 @@ Key files:
     write_text(prompt_file, prompt)
 
     if args.dry_run:
-        append_manager_log(base, f"recover-coordinator dry-run reason={reason} old_target={old_target} new_window={window}")
+        append_manager_log(base, f"recover-coordinator dry-run reason={reason} old_target={old_target} new_target={session}:{window}")
         append_schedule_event(base, "coordinator-recovery-dry-run", detail=f"Would recover coordinator old={old_target} new={session}:{window} reason={reason}")
         print(f"dry_run=true")
         print(f"would_launch={session}:{window}")
@@ -1953,7 +2033,7 @@ Key files:
         search=search,
         inline_tui=inline_tui,
     )
-    new_tmux_window(session, window, cwd, command)
+    start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     target = f"{session}:{window}"
     tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
     time.sleep(args.startup_wait)
@@ -1977,6 +2057,8 @@ Key files:
             "target": target,
             "session": session,
             "window": window,
+            "session_namespace": namespace,
+            "session_mode": "shared" if shared_session else "independent",
             "cwd": str(cwd),
             "model": model,
             "reasoning_effort": reasoning_effort,
@@ -1999,7 +2081,9 @@ Key files:
     )
     coordinator.setdefault("registered_at", now_iso())
     registry["coordinator"] = coordinator
-    registry["session"] = session
+    registry["session"] = namespace
+    registry["session_namespace"] = namespace
+    registry["session_mode"] = "shared" if shared_session else "independent"
     registry["updated_at"] = now_iso()
     save_registry(base, registry)
     write_text(status_file, json.dumps({"state": "launched", "target": target, "recovered_at": now_iso(), "reason": reason}, ensure_ascii=False) + "\n")
@@ -2020,9 +2104,17 @@ def cmd_launch(args: argparse.Namespace) -> None:
     constraints_file = ensure_constraints_doc(base)
 
     name = safe_name(args.name)
-    window = safe_name(args.window or f"cw-{name}")
-    if window_exists(args.session, window):
-        raise SystemExit(f"tmux window already exists: {args.session}:{window}")
+    shared_session = bool(args.shared_session)
+    if shared_session:
+        session = args.session
+        window = safe_name(args.window or f"cw-{name}")
+        if window_exists(session, window):
+            raise SystemExit(f"tmux target already exists: {session}:{window}")
+    else:
+        session = worker_session_name(args.session, name)
+        window = safe_name(args.window or "codex")
+        if session_exists(session):
+            raise SystemExit(f"tmux session already exists for worker {name}: {session}; stop/resume the registered worker or use a different worker name")
 
     worker_kind = args.worker_kind
     mode = args.mode or ("interactive" if worker_kind in {"autonomous-experiment", "branch-manager"} else "exec")
@@ -2032,7 +2124,8 @@ def cmd_launch(args: argparse.Namespace) -> None:
     cwd = requested_cwd
     if args.git_worktree:
         cwd, git_meta = create_git_worktree(base, name, requested_cwd, args)
-    ensure_session(args.session, cwd)
+    if shared_session:
+        ensure_session(session, cwd)
     owned_paths = normalize_paths(cwd, args.owned_path)
     resources = args.resource or []
     model, reasoning_effort = resolve_model_settings(args)
@@ -2051,7 +2144,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
     check_launch_conflicts(
         registry,
         name=name,
-        session=args.session,
+        session=session,
         owned_paths=owned_paths,
         resources=resources,
         allow_conflict=args.allow_conflict,
@@ -2065,7 +2158,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
     docs = create_worker_docs(
         base=base,
         name=name,
-        session=args.session,
+        session=session,
         window=window,
         worker_kind=worker_kind,
         cwd=cwd,
@@ -2113,7 +2206,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
         scope_lines.extend(
             [
                 "Autonomous experiment worker rules:",
-                "- This is a visible interactive Codex worker. Keep the tmux window useful for human review: briefly state major intent before important actions, run short inspections visibly, and summarize decisions as they happen.",
+                "- This is a visible interactive Codex worker. Keep the tmux target useful for human review: briefly state major intent before important actions, run short inspections visibly, and summarize decisions as they happen.",
                 "- Own this experiment branch within the assigned write scope and resources. You may run, diagnose, and iterate experiments without waiting for the coordinator on every small step.",
                 "- Long training/evaluation commands must run as background jobs with clear log files. Immediately register each job through the manager `job-add` command shown in the worker plan.",
                 "- Do not hide the work only inside detached scripts. The tmux Codex pane should show what you are checking, launching, diagnosing, and deciding.",
@@ -2163,8 +2256,8 @@ def cmd_launch(args: argparse.Namespace) -> None:
         search=args.search,
         inline_tui=args.inline_tui,
     )
-    new_tmux_window(args.session, window, cwd, command)
-    target = f"{args.session}:{window}"
+    start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
+    target = f"{session}:{window}"
     if mode == "interactive":
         tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
         time.sleep(args.startup_wait)
@@ -2179,12 +2272,16 @@ def cmd_launch(args: argparse.Namespace) -> None:
 
     registry = load_registry(base)
     registry["session"] = args.session
+    registry["session_namespace"] = args.session
+    registry["session_mode"] = "shared" if shared_session else "independent"
     registry["default_worker_model"] = DEFAULT_WORKER_MODEL
     registry["default_worker_reasoning"] = DEFAULT_WORKER_REASONING
     registry.setdefault("workers", {})[name] = {
         "name": name,
         "window": window,
-        "session": args.session,
+        "session": session,
+        "session_namespace": args.session,
+        "session_mode": "shared" if shared_session else "independent",
         "mode": mode,
         "worker_kind": worker_kind,
         "parent_worker": parent_worker,
@@ -2211,21 +2308,21 @@ def cmd_launch(args: argparse.Namespace) -> None:
     }
     registry["updated_at"] = now_iso()
     save_registry(base, registry)
-    append_manager_log(base, f"launch name={name} session={args.session} window={window} cwd={cwd}")
+    append_manager_log(base, f"launch name={name} session={session} window={window} mode={registry['session_mode']} cwd={cwd}")
     append_schedule_event(
         base,
         "launch",
         worker=name,
-        detail=f"Launched {mode} worker at {args.session}:{window}",
+        detail=f"Launched {mode} worker at {session}:{window}",
         data={"cwd": str(cwd), "resources": resources, "owned_paths": owned_paths, "parent_worker": parent_worker},
     )
     refresh_schedule_doc(base, registry)
-    print(f"launched {name} at {args.session}:{window}")
+    print(f"launched {name} at {session}:{window}")
     print(f"worker_kind={worker_kind}")
     if parent_worker:
         print(f"parent_worker={parent_worker}")
     print(f"mode={mode}")
-    print_window_access(args.session, window)
+    print_window_access(session, window)
     print(f"log={log_file}")
     print(f"progress={docs['progress']}")
     print(f"report={docs['report']}")
@@ -2240,6 +2337,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
             args.supervisor_query_interval,
             args.supervisor_refresh_schedule_interval,
             args.supervisor_progress_append_interval,
+            shared_session,
         )
 
 
@@ -2599,7 +2697,7 @@ def cmd_supervise(args: argparse.Namespace) -> None:
     if not args.once and not args.allow_foreground_loop:
         raise SystemExit(
             "Refusing to run an unbounded supervisor loop in the foreground. "
-            "Use start-supervisor to run it in tmux, or pass --allow-foreground-loop only from a managed tmux window."
+            "Use start-supervisor to run it in tmux, or pass --allow-foreground-loop only from a managed tmux target."
         )
     print(f"supervising state_dir={base} session={args.session} interval={args.interval}")
     last_query: dict[str, float] = {}
@@ -2660,7 +2758,7 @@ def cmd_supervise(args: argparse.Namespace) -> None:
 
 def start_supervisor_window(
     base: Path,
-    session: str,
+    namespace: str,
     cwd: Path,
     interval: int,
     ask: bool,
@@ -2668,15 +2766,21 @@ def start_supervisor_window(
     query_interval: int,
     refresh_schedule_interval: int,
     progress_append_interval: int,
+    shared_session: bool,
 ) -> None:
     require_binary("tmux")
-    ensure_session(session, cwd)
-    window = "cw-supervisor"
+    if shared_session:
+        session = namespace
+        window = "cw-supervisor"
+        ensure_session(session, cwd)
+    else:
+        session = role_session_name(namespace, "supervisor")
+        window = "supervisor"
     if window_exists(session, window):
         print(f"supervisor already present at {session}:{window}")
         return
-    command = supervisor_command(base, session, interval, ask, lines, query_interval, refresh_schedule_interval, progress_append_interval)
-    new_tmux_window(session, window, cwd, command)
+    command = supervisor_command(base, namespace, interval, ask, lines, query_interval, refresh_schedule_interval, progress_append_interval)
+    start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     append_manager_log(base, f"start-supervisor session={session} window={window} interval={interval} ask={ask}")
     append_schedule_event(base, "start-supervisor", detail=f"Started supervisor at {session}:{window} interval={interval} ask={ask}")
     refresh_schedule_doc(base, load_registry(base))
@@ -2697,12 +2801,13 @@ def cmd_start_supervisor(args: argparse.Namespace) -> None:
         args.query_interval,
         args.refresh_schedule_interval,
         args.progress_append_interval,
+        args.shared_session,
     )
 
 
 def start_health_supervisor_window(
     base: Path,
-    session: str,
+    namespace: str,
     cwd: Path,
     interval: int,
     lines: int,
@@ -2719,19 +2824,25 @@ def start_health_supervisor_window(
     escape_after: bool,
     recovery_prompt: str | None,
     force: bool,
+    shared_session: bool,
 ) -> None:
     require_binary("tmux")
-    ensure_session(session, cwd)
-    window = "cw-health-supervisor"
+    if shared_session:
+        session = namespace
+        window = "cw-health-supervisor"
+        ensure_session(session, cwd)
+    else:
+        session = role_session_name(namespace, "health-supervisor")
+        window = "health-supervisor"
     if window_exists(session, window):
         if not force:
             print(f"health supervisor already present at {session}:{window}")
             return
-        tmux("kill-window", "-t", f"{session}:{window}", check=False)
+        stop_tmux_target(session, window, independent_session=not shared_session)
         time.sleep(0.5)
     command = health_supervisor_command(
         base,
-        session,
+        namespace,
         interval,
         lines,
         stable_seconds,
@@ -2747,7 +2858,7 @@ def start_health_supervisor_window(
         escape_after,
         recovery_prompt,
     )
-    new_tmux_window(session, window, cwd, command)
+    start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     append_manager_log(
         base,
         f"start-health-supervisor session={session} window={window} interval={interval} "
@@ -2794,15 +2905,21 @@ def cmd_start_health_supervisor(args: argparse.Namespace) -> None:
         args.escape_after,
         args.recovery_prompt,
         args.force,
+        args.shared_session,
     )
 
 
 def cmd_stop_health_supervisor(args: argparse.Namespace) -> None:
     require_binary("tmux")
     base = state_dir(args.state_dir)
-    window = args.window or "cw-health-supervisor"
-    target = f"{args.session}:{window}"
-    result = tmux("kill-window", "-t", target, check=False)
+    if args.shared_session:
+        session = args.session
+        window = args.window or "cw-health-supervisor"
+    else:
+        session = role_session_name(args.session, "health-supervisor")
+        window = args.window or "health-supervisor"
+    target = f"{session}:{window}"
+    result = stop_tmux_target(session, window, independent_session=not args.shared_session)
     append_manager_log(base, f"stop-health-supervisor target={target} status={result.returncode}")
     append_schedule_event(base, "stop-health-supervisor", detail=f"Stopped health supervisor target={target} status={result.returncode}")
     refresh_schedule_doc(base, load_registry(base))
@@ -2819,9 +2936,14 @@ def cmd_resume(args: argparse.Namespace) -> None:
     if window_exists(worker["session"], worker["window"]) and not args.force:
         raise SystemExit(f"worker window is still present: {old_target}; use --force only if you intentionally want another window")
     cwd = Path(worker["cwd"]).expanduser().resolve()
-    ensure_session(args.session or worker["session"], cwd)
-    session = args.session or worker["session"]
-    window = safe_name(args.window or worker.get("window") or f"cw-{worker['name']}")
+    shared_session = bool(args.shared_session or target_mode(worker) == "shared")
+    if shared_session:
+        session = args.session if args.shared_session else worker.get("session", args.session)
+        window = safe_name(args.window or worker.get("window") or f"cw-{worker['name']}")
+        ensure_session(session, cwd)
+    else:
+        session = worker.get("session") or worker_session_name(worker.get("session_namespace") or args.session, worker["name"])
+        window = safe_name(args.window or worker.get("window") or "codex")
     if window_exists(session, window):
         window = safe_name(f"{window}-r{dt.datetime.now().strftime('%H%M%S')}")
     prompt_file = base / "tasks" / f"{worker['name']}.resume.{timestamp_slug()}.md"
@@ -2863,7 +2985,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
         search=args.search,
         inline_tui=inline_tui,
     )
-    new_tmux_window(session, window, cwd, command)
+    start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     target = f"{session}:{window}"
     if mode == "interactive":
         tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(worker['log_file']))}")
@@ -2871,6 +2993,8 @@ def cmd_resume(args: argparse.Namespace) -> None:
         send_prompt(target, f"Please first read unified coordinator constraints: {constraints_file}\nThen read and execute this resume prompt file: {prompt_file}")
     worker["session"] = session
     worker["window"] = window
+    worker["session_mode"] = "shared" if shared_session else "independent"
+    worker.setdefault("session_namespace", args.session)
     worker["mode"] = mode
     worker["model"] = model
     worker["reasoning_effort"] = reasoning_effort
@@ -3133,15 +3257,20 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
     require_binary("codex")
     base = state_dir(args.state_dir)
     cwd = Path(args.cwd).expanduser().resolve()
-    session = args.session
-    window = safe_name(args.window)
-    ensure_session(session, cwd)
+    shared_session = bool(args.shared_session)
+    if shared_session:
+        session = args.session
+        window = safe_name(args.window or "cw-consult")
+        ensure_session(session, cwd)
+    else:
+        session = role_session_name(args.session, "consult")
+        window = safe_name(args.window or "consult")
     if window_exists(session, window):
         if not args.force:
             registry = load_registry(base)
             consult = registry.get("consult") or {}
             if consult.get("session") != session or consult.get("window") != window:
-                raise SystemExit(f"tmux window already exists but is not the registered consult worker: {session}:{window}; use --force or --window")
+                raise SystemExit(f"tmux target already exists but is not the registered consult worker: {session}:{window}; use --force or --window")
             registry["session"] = session
             registry["state_dir"] = str(base)
             registry.setdefault("workers", {})
@@ -3152,10 +3281,12 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
             print(f"context={consult_context_path(base)}")
             print(f"schedule={schedule_path}")
             return
-        tmux("kill-window", "-t", f"{session}:{window}")
+        stop_tmux_target(session, window, independent_session=not shared_session)
 
     registry = load_registry(base)
-    registry["session"] = session
+    registry["session"] = args.session
+    registry["session_namespace"] = args.session
+    registry["session_mode"] = "shared" if shared_session else "independent"
     registry["state_dir"] = str(base)
     registry["default_worker_model"] = DEFAULT_WORKER_MODEL
     registry["default_worker_reasoning"] = DEFAULT_WORKER_REASONING
@@ -3181,7 +3312,7 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
         search=args.search,
         inline_tui=args.inline_tui,
     )
-    new_tmux_window(session, window, cwd, command)
+    start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     target = f"{session}:{window}"
     tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
     write_text(status_file, json.dumps({"state": "running", "started_at": now_iso()}, ensure_ascii=False) + "\n")
@@ -3190,6 +3321,8 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
         "role": "user-consultation",
         "window": window,
         "session": session,
+        "session_namespace": args.session,
+        "session_mode": "shared" if shared_session else "independent",
         "cwd": str(cwd),
         "prompt_file": str(prompt_file),
         "context_file": str(consult_context_path(base)),
@@ -3274,10 +3407,11 @@ def cmd_stop_consult(args: argparse.Namespace) -> None:
         print("no consult worker registered")
         return
     session = consult.get("session", registry.get("session", args.session))
-    window = consult.get("window", args.window or "cw-consult")
+    window = consult.get("window", args.window or ("cw-consult" if target_mode(consult) == "shared" else "consult"))
     target = f"{session}:{window}"
-    if window and window_exists(session, window):
-        tmux("kill-window", "-t", target)
+    independent_session = target_mode(consult) != "shared"
+    if (independent_session and session_exists(session)) or ((not independent_session) and window and window_exists(session, window)):
+        stop_tmux_target(session, window, independent_session=independent_session)
     status_file = consult.get("status_file")
     if status_file:
         write_text(Path(status_file), json.dumps({"state": "stopped", "stopped_at": now_iso()}, ensure_ascii=False) + "\n")
@@ -3299,8 +3433,9 @@ def cmd_stop(args: argparse.Namespace) -> None:
     if not worker:
         raise SystemExit(f"unknown worker: {args.name}")
     target = f"{worker['session']}:{worker['window']}"
-    if window_exists(worker["session"], worker["window"]):
-        tmux("kill-window", "-t", target)
+    independent_session = target_mode(worker) != "shared"
+    if (independent_session and session_exists(worker["session"])) or ((not independent_session) and window_exists(worker["session"], worker["window"])):
+        stop_tmux_target(worker["session"], worker["window"], independent_session=independent_session)
     status_file = worker.get("status_file")
     if status_file:
         write_text(Path(status_file), json.dumps({"state": "stopped", "stopped_at": now_iso()}, ensure_ascii=False) + "\n")
@@ -3316,11 +3451,12 @@ def cmd_stop(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help="Project-local worker state directory.")
-    parser.add_argument("--session", default=DEFAULT_SESSION, help="tmux session name.")
+    parser.add_argument("--session", default=DEFAULT_SESSION, help="tmux session namespace/prefix. By default workers get independent sessions like <namespace>-<worker>.")
+    parser.add_argument("--shared-session", action="store_true", help="Use the legacy topology: one tmux session with multiple worker windows.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init = sub.add_parser("init", help="Create or register the tmux session and state directory.")
-    init.add_argument("--cwd", default=os.getcwd(), help="Working directory for the tmux session.")
+    init = sub.add_parser("init", help="Create or register the worker state directory and tmux namespace.")
+    init.add_argument("--cwd", default=os.getcwd(), help="Working directory for managed tmux targets.")
     init.add_argument("--mission", help="Coordinator mission written into COORDINATOR_SCHEDULE.md.")
     init.set_defaults(func=cmd_init)
 
@@ -3328,7 +3464,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_coord.add_argument("--target", default="auto", help="Coordinator tmux target, as SESSION:WINDOW.PANE. Use auto inside tmux.")
     register_coord.add_argument("--cwd", default=os.getcwd(), help="Working directory for recovered coordinator sessions.")
     register_coord.add_argument("--mission", help="Optional mission update written into COORDINATOR_SCHEDULE.md.")
-    register_coord.add_argument("--restart-window-prefix", default="cw-main-recovered", help="Prefix for recovered main coordinator tmux windows.")
+    register_coord.add_argument("--restart-window-prefix", default="main-recovered", help="Suffix for recovered main coordinator tmux sessions; default creates cw-main-recovered-... with the cw namespace.")
     register_coord.add_argument("--allow-missing", action="store_true", help="Allow registering a target not currently present; intended for tests/pre-registration.")
     register_coord.add_argument("--model", help=f"Codex model for recovered coordinators. Default best model: {DEFAULT_WORKER_MODEL}.")
     register_coord.add_argument("--reasoning-effort", help=f"Codex reasoning effort for recovered coordinators. Default best effort: {DEFAULT_WORKER_REASONING}.")
@@ -3342,7 +3478,7 @@ def build_parser() -> argparse.ArgumentParser:
     recover_coord = sub.add_parser("recover-coordinator", help="Launch a new main coordinator Codex from durable worker state.")
     recover_coord.add_argument("--old-target", help="Old coordinator tmux target to record and optionally kill.")
     recover_coord.add_argument("--cwd", help="Working directory for the recovered coordinator; defaults to registered coordinator cwd.")
-    recover_coord.add_argument("--window", help="Explicit recovered coordinator tmux window name.")
+    recover_coord.add_argument("--window", help="Explicit recovered coordinator tmux window name inside the recovered session.")
     recover_coord.add_argument("--reason", default="manual-recovery")
     recover_coord.add_argument("--kill-old", action="store_true", help="Kill the old coordinator pane after preparing the recovery prompt.")
     recover_coord.add_argument("--force", action="store_true", help="Replace an existing recovered coordinator window with the same name.")
@@ -3358,12 +3494,12 @@ def build_parser() -> argparse.ArgumentParser:
     recover_coord.add_argument("--inline-tui", action="store_true", help="Pass Codex --no-alt-screen for inline TUI. Default keeps normal alternate-screen TUI so the bottom prompt/status line stays stable.")
     recover_coord.set_defaults(func=cmd_recover_coordinator)
 
-    launch = sub.add_parser("launch", help="Launch a Codex worker in a new tmux window.")
+    launch = sub.add_parser("launch", help="Launch a Codex worker in a tmux target; default is a new independent session.")
     launch.add_argument("name", help="Stable worker name.")
     launch.add_argument("--task", help="Worker task text.")
     launch.add_argument("--task-file", help="Path to a worker task prompt.")
     launch.add_argument("--cwd", default=os.getcwd(), help="Working directory for Codex.")
-    launch.add_argument("--window", help="Override tmux window name.")
+    launch.add_argument("--window", help="Override tmux window name inside the target session.")
     launch.add_argument("--git-worktree", action="store_true", help="Create an isolated git worktree for this worker.")
     launch.add_argument("--worktree-path", help="Explicit path for --git-worktree.")
     launch.add_argument("--branch", help="Branch name for --git-worktree.")
@@ -3386,7 +3522,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--approval", default="never")
     launch.add_argument("--search", action="store_true")
     launch.add_argument("--inline-tui", action="store_true", help="Pass Codex --no-alt-screen for inline TUI. Default keeps normal alternate-screen TUI so the bottom prompt/status line stays stable.")
-    launch.add_argument("--start-supervisor", action="store_true", help="Start a tmux supervisor window after launch.")
+    launch.add_argument("--start-supervisor", action="store_true", help="Start a tmux supervisor target after launch.")
     launch.add_argument("--no-start-supervisor", action="store_true", help="Do not auto-start supervisor for autonomous-experiment workers.")
     launch.add_argument("--supervisor-interval", type=int, default=300)
     launch.add_argument("--supervisor-lines", type=int, default=120)
@@ -3476,7 +3612,7 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--continue-prompt", default="Thanks. Please continue the previous task.")
     supervise.set_defaults(func=cmd_supervise)
 
-    start_supervisor = sub.add_parser("start-supervisor", help="Start the supervisor loop in a tmux window.")
+    start_supervisor = sub.add_parser("start-supervisor", help="Start the supervisor loop in a tmux target.")
     start_supervisor.add_argument("--cwd", default=os.getcwd())
     start_supervisor.add_argument("--interval", type=int, default=300)
     start_supervisor.add_argument("--lines", type=int, default=120)
@@ -3502,11 +3638,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_health.add_argument("--dry-run", action="store_true", help="Detect and log recovery actions without sending prompts.")
     start_health.add_argument("--escape-after", action="store_true", help="Send Escape after submitting a recovery prompt.")
     start_health.add_argument("--recovery-prompt", help="Override the default recovery prompt sent to stuck interactive Codex panes.")
-    start_health.add_argument("--force", action="store_true", help="Replace an existing cw-health-supervisor window.")
+    start_health.add_argument("--force", action="store_true", help="Replace an existing cw-health-supervisor target.")
     start_health.set_defaults(func=cmd_start_health_supervisor)
 
-    stop_health = sub.add_parser("stop-health-supervisor", help="Kill the tmux health supervisor window.")
-    stop_health.add_argument("--window", default="cw-health-supervisor")
+    stop_health = sub.add_parser("stop-health-supervisor", help="Kill the tmux health supervisor target.")
+    stop_health.add_argument("--window", help="tmux window name. Defaults to health-supervisor, or cw-health-supervisor with --shared-session.")
     stop_health.set_defaults(func=cmd_stop_health_supervisor)
 
     resume = sub.add_parser("resume", help="Resume an interrupted worker from its durable artifacts.")
@@ -3562,11 +3698,11 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_note.add_argument("--mission", help="Update the current overall mission.")
     schedule_note.set_defaults(func=cmd_schedule_note)
 
-    start_consult = sub.add_parser("start-consult", help="Start a read-only user consultation Codex worker in a tmux window.")
+    start_consult = sub.add_parser("start-consult", help="Start a read-only user consultation Codex worker in a tmux target.")
     start_consult.add_argument("--cwd", default=os.getcwd(), help="Working directory for the consultation Codex process.")
-    start_consult.add_argument("--window", default="cw-consult", help="tmux window name for the consultation worker.")
+    start_consult.add_argument("--window", help="tmux window name inside the consult session. Defaults to consult, or cw-consult with --shared-session.")
     start_consult.add_argument("--startup-wait", type=int, default=8, help="Seconds to wait before pasting the consultation prompt.")
-    start_consult.add_argument("--force", action="store_true", help="Replace an existing consultation window with the same name.")
+    start_consult.add_argument("--force", action="store_true", help="Replace an existing consultation target with the same name.")
     start_consult.add_argument("--model", help=f"Codex model for the consultation worker. Default best model: {DEFAULT_WORKER_MODEL}.")
     start_consult.add_argument("--reasoning-effort", help=f"Codex reasoning effort. Default best effort: {DEFAULT_WORKER_REASONING}.")
     start_consult.add_argument("--no-best-model", action="store_true", help="Do not apply the manager's default best model/reasoning; use Codex CLI/profile defaults unless explicitly set.")
@@ -3579,7 +3715,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     consult_sync = sub.add_parser("consult-sync", help="Refresh consultation context and optionally notify the consultation worker.")
     consult_sync.add_argument("--message", help="Coordinator note to include in the sync event and notification.")
-    consult_sync.add_argument("--notify", action="store_true", help="Paste a refresh notice into the consultation worker window.")
+    consult_sync.add_argument("--notify", action="store_true", help="Paste a refresh notice into the consultation worker target.")
     consult_sync.add_argument("--escape-first", action="store_true", help="Send Escape before the notification prompt.")
     consult_sync.set_defaults(func=cmd_consult_sync)
 
@@ -3587,11 +3723,11 @@ def build_parser() -> argparse.ArgumentParser:
     consult_context.add_argument("--print", action="store_true", help="Print the consultation context content.")
     consult_context.set_defaults(func=cmd_consult_context)
 
-    stop_consult = sub.add_parser("stop-consult", help="Kill the consultation worker tmux window.")
+    stop_consult = sub.add_parser("stop-consult", help="Kill the consultation worker tmux target.")
     stop_consult.add_argument("--window", help="Fallback window name if registry is incomplete.")
     stop_consult.set_defaults(func=cmd_stop_consult)
 
-    stop = sub.add_parser("stop", help="Kill one worker tmux window.")
+    stop = sub.add_parser("stop", help="Kill one worker tmux target.")
     stop.add_argument("name")
     stop.set_defaults(func=cmd_stop)
 

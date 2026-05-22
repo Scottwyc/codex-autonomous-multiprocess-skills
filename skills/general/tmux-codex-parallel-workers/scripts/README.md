@@ -9,8 +9,8 @@ Primary orchestration command.
 Responsibilities:
 
 - initialize a project-local worker state directory
-- launch `codex exec` or interactive Codex workers in tmux windows
-- create tmux windows detached by default, so launching workers or supervisors does not switch the user's current tmux view
+- launch `codex exec` or interactive Codex workers in independent tmux sessions by default
+- use the short `cw-` tmux session prefix by default, for example `cw-child-a:codex`
 - use normal Codex alternate-screen TUI for interactive workers by default; `--inline-tui` is opt-in for forwarding Codex `--no-alt-screen`
 - support visible `autonomous-experiment` workers
 - support subordinate `branch-manager` workers for major branches
@@ -33,12 +33,12 @@ MANAGER="${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   init --cwd "$PWD" --mission "Coordinate a long-running autonomous project."
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch audit-a \
   --cwd "$PWD" \
   --write-scope "read-only audit and report" \
@@ -50,7 +50,7 @@ Branch manager and peer communication:
 ```bash
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch branch-mgr \
   --cwd "$PWD" \
   --worker-kind branch-manager \
@@ -59,17 +59,17 @@ python "$MANAGER" \
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch child-a \
   --cwd "$PWD" \
   --parent-worker branch-mgr \
   --worker-kind autonomous-experiment \
   --task "Run one bounded child experiment and report evidence paths."
 
-tmux list-windows -t codex-workers
-tmux attach -t codex-workers
+tmux ls | rg '^cw(-|:)'
+tmux attach -t cw-child-a
 # From inside tmux:
-tmux switch-client -t codex-workers:cw-child-a
+tmux switch-client -t cw-child-a:codex
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
@@ -81,8 +81,8 @@ python "$MANAGER" \
 If an older interactive worker was launched with inline TUI and the bottom Codex prompt/status line is missing, restart that worker from durable state:
 
 ```bash
-python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers stop child-a
-python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers resume child-a --mode interactive
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw stop child-a
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw resume child-a --mode interactive
 ```
 
 Common commands:
@@ -108,7 +108,7 @@ tmux display-message -p '#S:#W.#{pane_index}'
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   register-coordinator \
   --target <SESSION:WINDOW.PANE> \
   --cwd "$PWD" \
@@ -116,7 +116,7 @@ python "$MANAGER" \
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   start-health-supervisor \
   --restart-main-on-context-full \
   --restart-main-when-missing
@@ -129,7 +129,7 @@ Manual recovery:
 ```bash
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   recover-coordinator --reason manual-restart --kill-old
 ```
 
@@ -145,8 +145,8 @@ Context budget defaults:
 Long-running monitors:
 
 ```bash
-python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-supervisor --interval 300
-python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-health-supervisor --interval 30 --restart-main-on-context-full --restart-main-when-missing
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-supervisor --interval 300
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-health-supervisor --interval 30 --restart-main-on-context-full --restart-main-when-missing
 ```
 
 ## `codex_tmux_health_supervisor.py`
@@ -174,7 +174,7 @@ Direct dry-run:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_health_supervisor.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   --once --dry-run
 ```
 
@@ -185,12 +185,12 @@ tmux display-message -p '#S:#W.#{pane_index}'
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
 
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   start-health-supervisor \
   --restart-main-on-context-full \
   --restart-main-when-missing

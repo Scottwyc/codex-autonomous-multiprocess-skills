@@ -121,7 +121,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - Visible interactive workers should use the manager's default normal Codex TUI, not inline `--no-alt-screen`, unless the user explicitly chooses `--inline-tui`; the normal TUI keeps the bottom prompt/status line stable.
    - In this environment, launch/resume project-local experiment workers with YOLO-level permissions (`sandbox=danger-full-access`, `approval=never`) unless the user explicitly asks for a restricted worker. This avoids the read-only `.codex` mount and blocked SSH failure mode seen under `workspace-write`.
    - Even under YOLO permissions, worker prompts must avoid destructive filesystem operations such as `rm` unless the coordinator explicitly authorizes a narrowly scoped cleanup.
-   - Prefer keeping visible worker panes on the local/nature host. Workers should operate other machines through SSH from the local pane, so the user can monitor, interrupt, and clean all worker windows in one local tmux session.
+   - Prefer keeping visible worker sessions on the local/nature host under the project worker namespace, normally `cw-`. Workers should operate other machines through SSH from the local Codex session, so the user can attach to, interrupt, and clean each worker independently without shared-session window switching.
 7. For major branches, launch a subordinate branch manager before launching many front-line workers directly.
    - Use `tmux-codex-parallel-workers launch <branch> --worker-kind branch-manager`.
    - Give it a concrete branch mission, `--manager-scope`, resources, owned output roots, and the expected branch-level report.
@@ -145,7 +145,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - ask workers to write long evidence to report/artifact/log files and provide paths plus short summaries;
    - keep consultation-window answers compact and evidence-linked.
 14. At each monitoring checkpoint, inspect compact memory, branch-manager summaries, and worker summaries first, inspect changed files or longer captures only when needed, integrate safe results, refresh the consultation context, and record the decision in the follow-up file and compact memory.
-15. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux windows accumulate.
+15. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux sessions or targets accumulate.
 16. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
 17. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
 18. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. If the main Codex itself is registered inside tmux, use `--restart-main-on-context-full --restart-main-when-missing` so the health supervisor launches `recover-coordinator` when the old coordinator exhausts its context window or the registered target disappears.

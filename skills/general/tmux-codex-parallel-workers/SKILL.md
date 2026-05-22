@@ -1,15 +1,15 @@
 ---
 name: tmux-codex-parallel-workers
-description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in tmux windows for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-window autonomous workers, visible autonomous experiment workers, subordinate branch-manager workers, manager-mediated worker-to-worker communication, unified coordinator constraints, compact coordinator memory/context packs, a read-only user consultation window, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
+description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in separate tmux sessions for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-session autonomous workers, visible autonomous experiment workers, subordinate branch-manager workers, manager-mediated worker-to-worker communication, unified coordinator constraints, compact coordinator memory/context packs, a read-only user consultation worker, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
 ---
 
 # Tmux Codex Parallel Workers
 
 ## Overview
 
-Use this skill to run separate Codex CLI processes in tmux windows while the current agent remains the coordinator. It is for parallelism in long-running autonomous work: independent code exploration, experiment monitoring, report drafting, log analysis, user consultation, or bounded code changes with disjoint ownership.
+Use this skill to run separate Codex CLI processes in tmux sessions while the current agent remains the coordinator. It is for parallelism in long-running autonomous work: independent code exploration, experiment monitoring, report drafting, log analysis, user consultation, or bounded code changes with disjoint ownership.
 
-Prefer built-in subagents when structured result return is enough and persistence is unnecessary. Prefer this tmux mode when long-running autonomous project management is active by default, or when the user wants real OS-level Codex processes, persistent tmux windows, manual attach/capture, user consultation, or long-running background workers.
+Prefer built-in subagents when structured result return is enough and persistence is unnecessary. Prefer this tmux mode when long-running autonomous project management is active by default, or when the user wants real OS-level Codex processes, persistent tmux sessions, manual attach/capture, user consultation, or long-running background workers.
 
 For substantial experimental branches, the coordinator may launch a subordinate `branch-manager` worker. The main coordinator gives that worker the branch goal and resource envelope, then the branch manager launches and coordinates front-line `autonomous-experiment` child workers. This reduces main-context load while preserving coordinator-owned final review and user-facing decisions.
 
@@ -49,30 +49,35 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Coordinator spot checks should start with `compact-memory --print --context-pack`, `compact-memory --print`, `list`, `jobs`, and `progress --lines 20`; use `schedule`, `collect --lines 20/30`, and short `capture --lines 80` only when summaries are insufficient.
    - Keep `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as the coordinator's short reload memory, `COORDINATOR_SCHEDULE.md` as the audit/control document, and `CONSULT_CONTEXT.md` as the user-consultation summary. None of them should become raw scrollback mirrors.
    - After important decisions, run `compact-memory --note ... --decision ... --next-action ...` so the next checkpoint or recovered coordinator can continue from files rather than chat history.
-7. Use paste-buffer for prompt delivery.
+7. Use independent tmux sessions by default.
+   - `--session cw` is a namespace/prefix, not a shared session, unless `--shared-session` is explicitly passed.
+   - A worker named `exp-a` should normally run at `cw-exp-a:codex`; consultation runs at `cw-consult:consult`; supervisors run at `cw-supervisor:supervisor` and `cw-health-supervisor:health-supervisor`.
+   - This lets the user attach to multiple workers from different terminals without tmux active-window switching.
+   - Use `tmux ls | rg '^cw(-|:)'` to list managed sessions and `tmux attach -t cw-exp-a` to inspect one worker.
+8. Use paste-buffer for prompt delivery.
    - Multiline instructions must go through the manager's `send` or `interrupt-send`, which uses `tmux set-buffer`, `tmux paste-buffer`, then Enter.
    - If the worker is busy and a new instruction must interrupt it, use `interrupt-send`, which submits the new message first and then sends Escape so Codex switches to the queued instruction immediately.
-8. Use the strongest available worker model by default.
+9. Use the strongest available worker model by default.
    - The manager defaults tmux Codex workers to `gpt-5.5` with `model_reasoning_effort="xhigh"` in this environment.
    - Override globally with `CODEX_WORKER_DEFAULT_MODEL` and `CODEX_WORKER_DEFAULT_REASONING`.
    - Override per worker with `--model` and `--reasoning-effort`, or use `--no-best-model` to fall back to Codex CLI/profile defaults.
-9. Offer a dedicated user consultation window when the user wants to inspect details without interrupting the coordinator.
-   - Start it with `start-consult`; it runs a read-only Codex process in `cw-consult`.
+10. Offer a dedicated user consultation window when the user wants to inspect details without interrupting the coordinator.
+   - Start it with `start-consult`; it runs a read-only Codex process in `cw-consult:consult`.
    - It reads `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` and `COORDINATOR_SCHEDULE.md` before answering.
    - It must answer questions only; execution, recovery, launch, stop, and integration decisions stay with the coordinator or manager commands.
-10. Use the health supervisor for long-lived autonomous runs.
-   - Start it with `start-health-supervisor`; it runs in `cw-health-supervisor`.
+11. Use the health supervisor for long-lived autonomous runs.
+   - Start it with `start-health-supervisor`; it runs in `cw-health-supervisor:health-supervisor`.
    - It automatically monitors registered interactive workers and the registered main coordinator target unless disabled.
    - When the main coordinator itself runs inside tmux, register it with `register-coordinator` before starting health supervision. This writes `COORDINATOR_RECOVERY.md`, records the coordinator target/model/cwd, and lets a later coordinator reconstruct the run from durable state.
    - If the registered coordinator hits context-window exhaustion, start health supervision with `--restart-main-on-context-full`; if its tmux target may disappear outright, also use `--restart-main-when-missing`. The health supervisor calls `recover-coordinator`, optionally kills the old pane, and launches a new main coordinator that reads `COORDINATOR_RECOVERY.md`, `COORDINATOR_SCHEDULE.md`, workers, jobs, reports, and consultation context.
    - It auto-recovers only interactive Codex panes. Use `--observe-target` for panes that should be logged but never receive pasted recovery prompts.
    - It is for recoverable network/subprocess stalls, not semantic experiment failures, quota/auth failures, merge conflicts, or metric regressions.
-11. Use branch-manager workers for major branches.
+12. Use branch-manager workers for major branches.
    - Start them with `launch <name> --worker-kind branch-manager`; they default to visible interactive mode and supervisor like autonomous experiment workers.
    - Give each branch manager a clear mission, `--manager-scope`, resource envelope, and allowed write/output roots.
    - Branch managers may launch child workers with `--parent-worker <branch-manager>` and coordinate their reports, jobs, and peer messages.
    - Branch managers produce branch-level progress/report summaries for the main coordinator; they do not own final merge, promotion, cross-branch resource decisions, or user-facing conclusions unless explicitly delegated.
-12. Allow front-line worker communication only through manager-mediated messages.
+13. Allow front-line worker communication only through manager-mediated messages.
    - Use `peer-send <source> <target> --message ...` or `--message-file ...`.
    - Peer messages are for short factual evidence, blockers, dependency notices, and artifact paths.
    - Peer messages must not silently change another worker's scope, resources, experiment gate, or final decision authority.
@@ -88,7 +93,7 @@ Initialize a session:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   init --cwd "$PWD" --mission "Run the long autonomous evaluation line and coordinate worker reports."
 ```
 
@@ -97,7 +102,7 @@ Start a read-only user consultation window:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   start-consult --cwd "$PWD"
 ```
 
@@ -107,7 +112,7 @@ Register a tmux-hosted main coordinator for durable restart:
 tmux display-message -p '#S:#W.#{pane_index}'
 python /home/wuyangcheng/.codex/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   register-coordinator \
   --target <SESSION:WINDOW.PANE> \
   --cwd "$PWD" \
@@ -119,7 +124,7 @@ Manual coordinator recovery from durable state:
 ```bash
 python /home/wuyangcheng/.codex/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   recover-coordinator \
   --reason manual-restart \
   --kill-old
@@ -138,7 +143,7 @@ Launch a one-shot unattended worker:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch result-audit \
   --cwd "$PWD" \
   --mode exec \
@@ -164,7 +169,7 @@ Launch a long-running interactive worker with an attached supervisor:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch long-eval \
   --cwd "$PWD" \
   --git-worktree \
@@ -184,7 +189,7 @@ Launch a visible autonomous experiment worker:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch exp-a \
   --cwd "$PWD" \
   --git-worktree \
@@ -197,14 +202,14 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --task-file /tmp/exp_a_autonomous_worker.md
 ```
 
-`autonomous-experiment` defaults to `interactive` mode and starts the supervisor unless `--no-start-supervisor` is passed. Attach with `tmux attach -t codex-workers`, then switch to the worker window such as `cw-exp-a` to watch the Codex worker's actual planning, inspections, commands, and recovery decisions.
+`autonomous-experiment` defaults to `interactive` mode and starts the supervisor unless `--no-start-supervisor` is passed. Attach with `tmux attach -t cw-exp-a` to watch the Codex worker's actual planning, inspections, commands, and recovery decisions.
 
 Launch a subordinate branch manager for a major experiment line:
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch moe-branch-manager \
   --cwd "$PWD" \
   --worker-kind branch-manager \
@@ -221,7 +226,7 @@ A branch manager can then launch child workers with `--parent-worker`:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   launch moe-k-sweep \
   --parent-worker moe-branch-manager \
   --worker-kind autonomous-experiment \
@@ -254,7 +259,8 @@ cat .codex/tmux-workers/peer_messages.jsonl
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers capture result-audit --lines 80 --log
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers progress result-audit
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers jobs
-tmux attach -t codex-workers
+tmux ls | rg '^cw(-|:)'
+tmux attach -t cw-result-audit
 ```
 
 Use larger `--lines` values only when diagnosing a concrete failure. Normal coordination should read schedule/progress/report summaries first and keep long captures on disk.
@@ -281,7 +287,7 @@ Start health monitoring and transient-error recovery:
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   start-health-supervisor --interval 30 --stable-seconds 20 --cooldown 120
 ```
 
@@ -291,19 +297,19 @@ Include the main coordinator pane when the coordinator itself is running inside 
 tmux display-message -p '#S:#W.#{pane_index}'
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
 
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  --session codex-workers \
+  --session cw \
   start-health-supervisor --restart-main-on-context-full --restart-main-when-missing
 ```
 
 Use `--dry-run` first if you want detection logs without pasted recovery prompts. Stop it with:
 
 ```bash
-python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers --session codex-workers stop-health-supervisor
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers --session cw stop-health-supervisor
 ```
 
 Register or stop background jobs launched by a worker:
@@ -331,9 +337,9 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 The script defaults to:
 
-- tmux session: `codex-workers`
-- tmux window creation: detached `tmux new-window -d`, so launching/resuming workers, consultation windows, supervisors, and recovered coordinators does not switch the user's current tmux view
-- stable tmux targets: each worker has its own named window such as `codex-workers:cw-exp-a`; inspect with `tmux list-windows -t codex-workers`, attach with `tmux attach -t codex-workers`, or switch from inside tmux with `tmux switch-client -t codex-workers:<window>`
+- tmux namespace: `cw`
+- tmux topology: independent sessions by default, so worker `exp-a` runs at `cw-exp-a:codex`, consult at `cw-consult:consult`, supervisor at `cw-supervisor:supervisor`, and health supervisor at `cw-health-supervisor:health-supervisor`
+- legacy shared-session topology: pass global `--shared-session` before the subcommand to use one `cw` session with multiple windows such as `cw:cw-exp-a`
 - state directory: `.codex/tmux-workers`
 - worker mode: `codex exec`
 - autonomous experiment worker mode: normal Codex alternate-screen interactive TUI in tmux, preserving the bottom prompt/status line
@@ -354,15 +360,15 @@ The script defaults to:
 - coordinator constraints: `.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md`
 - consultation context: `.codex/tmux-workers/consult/CONSULT_CONTEXT.md`
 - consultation prompt: `.codex/tmux-workers/consult/consult.prompt.md`
-- normal supervisor window/status/log: `cw-supervisor`, `.codex/tmux-workers/status/supervisor.json`, `.codex/tmux-workers/logs/supervisor.log`
-- health supervisor window/status/log: `cw-health-supervisor`, `.codex/tmux-workers/status/health_supervisor.json`, `.codex/tmux-workers/logs/health-supervisor.log`
+- normal supervisor session/status/log: `cw-supervisor:supervisor`, `.codex/tmux-workers/status/supervisor.json`, `.codex/tmux-workers/logs/supervisor.log`
+- health supervisor session/status/log: `cw-health-supervisor:health-supervisor`, `.codex/tmux-workers/status/health_supervisor.json`, `.codex/tmux-workers/logs/health-supervisor.log`
 - consultation log/status: `.codex/tmux-workers/logs/consult.log` and `.codex/tmux-workers/consult/consult.status.json`
 
 Override these when project policy requires it:
 
-- Use `--sandbox danger-full-access` as the default for project-local autonomous experiment workers in this environment. Keep worker prompts conservative around destructive operations such as `rm`, and prefer manager stop/kill-window semantics for worker cleanup.
+- Use `--sandbox danger-full-access` as the default for project-local autonomous experiment workers in this environment. Keep worker prompts conservative around destructive operations such as `rm`, and prefer manager `stop`/`stop-consult`/`stop-health-supervisor` commands for worker cleanup.
 - Use `--sandbox workspace-write` only for intentionally restricted read/write workers that do not need SSH or cross-mount writes.
-- Prefer placing all visible worker tmux windows on the local/nature machine in the project-local `codex-workers` session. When a branch needs another server, the local worker should SSH outward to zhuhai/zeng/etc. rather than creating or depending on remote Codex worker panes. This keeps monitoring and cleanup centralized for the user.
+- Prefer placing all visible worker tmux sessions on the local/nature machine under the project-local `cw-` prefix. When a branch needs another server, the local worker should SSH outward to zhuhai/zeng/etc. rather than creating or depending on remote Codex worker panes. This keeps monitoring and cleanup centralized for the user.
 - Use `--model`, `--reasoning-effort`, `--profile`, or `--no-best-model` when cost, quota, speed, or model availability requires a different Codex configuration.
 - Use `--search` only when live web access is needed.
 - Use `--allow-conflict` only when a path or resource overlap is intentional and externally safe.
@@ -394,7 +400,7 @@ Use `--worker-kind autonomous-experiment` for a worker that should independently
 
 This worker type is designed for visibility:
 
-- it defaults to `interactive`, so the worker's Codex session is visible in its tmux window
+- it defaults to `interactive`, so the worker's Codex session is visible in its dedicated tmux session
 - it defaults to the normal Codex alternate-screen TUI so the bottom prompt/status line and `working` indicator stay visible
 - `--inline-tui` is opt-in and may make the bottom prompt/status line less reliable
 - it prints a tmux attach hint after launch
@@ -433,7 +439,7 @@ Use `schedule-note` whenever the coordinator makes a non-obvious decision, such 
 
 ## User Consultation Window Pattern
 
-Use `start-consult` when the user wants a persistent question-and-answer window that does not interrupt the main coordinator. The consultation worker is a separate interactive Codex process in tmux, normally at `codex-workers:cw-consult`, launched with the same strongest-model default as other workers but with `--sandbox read-only`.
+Use `start-consult` when the user wants a persistent question-and-answer window that does not interrupt the main coordinator. The consultation worker is a separate interactive Codex process in tmux, normally at `cw-consult:consult`, launched with the same strongest-model default as other workers but with `--sandbox read-only`.
 
 The consultation worker is not an execution worker. It should:
 
@@ -464,7 +470,7 @@ Use the supervisor for long-running interactive workers or for periodic capture 
 
 - `supervise --once` captures the current tmux output and appends a timestamped pointer into each progress file.
 - `supervise` without `--once` refuses to run in the coordinator foreground; this prevents unbounded unified exec sessions.
-- `start-supervisor` runs the supervisor loop in a dedicated `cw-supervisor` tmux window and is the only normal way to start persistent monitoring.
+- `start-supervisor` runs the supervisor loop in a dedicated `cw-supervisor:supervisor` tmux session and is the only normal way to start persistent monitoring.
 - The supervisor writes `.codex/tmux-workers/status/supervisor.json` with its PID, cycle, interval, and last loop timestamp.
 - The loop throttles expensive refreshes: schedule/context refresh defaults to every 900 seconds, and unchanged progress-file appends default to every 1800 seconds.
 - `--query-interactive` sends a short progress question only to interactive workers marked `stalled` by default. Use `--query-any-running` only when interrupting active workers is acceptable.
@@ -516,13 +522,13 @@ Workers should record long-running training/evaluation commands, PIDs, logs, and
 
 ## Resume And Collect
 
-Use `resume <worker>` when a tmux window disappears or a worker needs to continue from durable artifacts. The resume prompt points the worker to its workplan, progress, report, inbox, and job registry.
+Use `resume <worker>` when a tmux target disappears or a worker needs to continue from durable artifacts. The resume prompt points the worker to its workplan, progress, report, inbox, and job registry.
 
 Use `collect` before final decisions. It writes a coordinator summary containing worker states, jobs, progress tails, report tails, and git diff stats.
 
 ## Current Limits
 
-This manager coordinates tmux windows, local files, optional git worktrees, and registered background PIDs. It does not automatically merge worker branches or decide whether metrics pass a project gate. The coordinator must review diffs, logs, tests, and reports before accepting results.
+This manager coordinates tmux sessions/targets, local files, optional git worktrees, and registered background PIDs. It does not automatically merge worker branches or decide whether metrics pass a project gate. The coordinator must review diffs, logs, tests, and reports before accepting results.
 
 ## Autonomous Parallel Mode
 
