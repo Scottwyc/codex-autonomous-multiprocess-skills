@@ -18,13 +18,14 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - Skip tmux workers only when the user disables worker parallelism, the environment lacks `tmux` or `codex`, cost/quota constraints make extra Codex processes inappropriate, or there is no independent side branch worth parallelizing.
    - For long-lived work, start the read-only consultation worker so the user can ask status and evidence questions in its tmux window without interrupting the coordinator.
    - For experiment branches, prefer visible `--worker-kind autonomous-experiment` workers so the user can attach to tmux and watch the Codex worker's actual planning, checks, commands, diagnostics, and handoff.
+   - Treat coordinator context as scarce: worker updates should be summaries with evidence paths; raw logs, full diffs, long tables, and complete transcripts should remain in files unless explicitly needed.
    - When a busy interactive worker needs an immediate redirect, use `interrupt-send`: the manager submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
    - For long-lived tmux Codex operation, start `start-health-supervisor` to recover interactive panes stuck on known transient Codex network/subprocess errors. Include the coordinator pane with `--watch-target main=<SESSION:WINDOW.PANE>` only when the main Codex is itself running inside tmux.
 4. Monitor on a cadence.
    - Early launch: check frequently.
    - Stable run: check at a slower cadence.
    - Near decision point: tighten the cadence.
-   - Main-coordinator checks must be short and bounded. Use `supervise --once`, `jobs`, `progress`, and short log tails.
+   - Main-coordinator checks must be short and bounded. Use `supervise --once`, `jobs`, `progress --lines 40`, `collect --lines 30`, and short log tails.
    - Persistent monitor loops must run through `start-supervisor` or `start-health-supervisor` in tmux, not as foreground commands in the coordinator process.
 5. Fill idle time with exploration.
    - Draft next ideas.
@@ -52,6 +53,7 @@ This reference describes a reusable autonomous follow-up loop for long-running p
 - Prefer a few disjoint experiments over many nearly identical ones.
 - In autonomous follow-up mode, assume tmux Codex workers are the default route for useful side branches. Give each worker a disjoint write scope and explicit resource ownership before launch.
 - Keep `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` and `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` current so worker state, scheduling decisions, and user-consultation answers remain auditable.
+- Keep the schedule and consultation context compact. They should contain worker status, concise report/progress excerpts, and paths to evidence, not full tmux scrollback or raw experiment logs.
 - Do not keep the coordinator alive with bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded Python loops. Put those jobs in tmux or background processes with registered PID/log/resource ownership.
 
 ## Monitoring Cadence
@@ -70,6 +72,7 @@ During each check, verify:
 - no duplicate or zombie jobs have appeared
 - tmux Codex workers are still relevant, and their captured output has been reviewed before any integration decision
 - the dedicated consultation worker has refreshed context after major scheduling decisions, if it is running
+- the coordinator has loaded only the smallest necessary evidence slice; escalate from summary to short tail to full artifact only when needed
 
 ## Decision Gates
 

@@ -356,6 +356,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
         f"tmux session：`{session}`",
         f"默认 worker 模型：`{registry.get('default_worker_model', DEFAULT_WORKER_MODEL)}`",
         f"默认 reasoning effort：`{registry.get('default_worker_reasoning', DEFAULT_WORKER_REASONING)}`",
+        "上下文预算：调度文档只保留摘要和证据路径；完整日志、长输出、完整 diff 和 tmux transcript 保存在对应 artifact/log/capture 文件中。",
         f"当前总目标：{mission}",
         "",
         "## 用户咨询窗口",
@@ -386,10 +387,10 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             "## 用户审查入口",
             "",
             f"- 查看 worker：`python {MANAGER_PATH} --state-dir {base} list`",
-            f"- 查看进展：`python {MANAGER_PATH} --state-dir {base} progress <worker>`",
+            f"- 查看进展：`python {MANAGER_PATH} --state-dir {base} progress <worker> --lines 40`",
             f"- 查看 jobs：`python {MANAGER_PATH} --state-dir {base} jobs`",
             f"- 查看咨询上下文：`python {MANAGER_PATH} --state-dir {base} consult-context --print`",
-            f"- 汇总收口：`python {MANAGER_PATH} --state-dir {base} collect`",
+            f"- 汇总收口：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
             f"- 连接 tmux：`tmux attach -t {session}`",
             "",
         ]
@@ -469,12 +470,12 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
         lines.append("")
         lines.extend(["#### 后台 Jobs", ""])
         lines.append("\n".join(job_line(job) for job in jobs) if jobs else "无已登记后台 job。")
-        lines.extend(["", "#### 最新进展摘录", "", "```text", tail_text(progress_file, 30), "```", ""])
-        lines.extend(["#### 最新报告摘录", "", "```text", tail_text(report_file, 30), "```", ""])
+        lines.extend(["", "#### 最新进展摘录", "", "```text", tail_text(progress_file, 18), "```", ""])
+        lines.extend(["#### 最新报告摘录", "", "```text", tail_text(report_file, 18), "```", ""])
         if cwd.exists():
             lines.extend(["#### Git 摘要", "", "```text", git_summary(cwd), "```", ""])
 
-    events = load_schedule_events(base, 60)
+    events = load_schedule_events(base, 40)
     lines.extend(["## 调度事件日志", ""])
     if events:
         event_rows = [
@@ -539,6 +540,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         "- 你是只读的用户咨询窗口 worker，负责回答用户关于当前长程自主任务、worker、日志、结果、资源和下一步的问题。",
         "- 每次回答用户问题前，先读取本文件和调度总览文件；必要时再读取 progress/report/jobs/captures/logs。",
         "- 默认用中文回答，给出可审查的文件路径和证据，不要凭记忆回答。",
+        "- 默认简洁回答：先给结论、状态、证据路径和下一步；长日志、长表格、完整 diff 或完整 transcript 只给路径和短摘要。",
         "- 不要启动、停止、恢复 worker，不要修改项目文件，不要改调度状态；如果用户要求执行操作，说明应由主进程或 manager 命令执行。",
         "- 如果信息缺失，明确说明缺失的文件或尚未完成的 worker，而不是猜测。",
         "",
@@ -548,7 +550,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         f"- 调度总览：`python {MANAGER_PATH} --state-dir {base} schedule --print`",
         f"- worker 列表：`python {MANAGER_PATH} --state-dir {base} list`",
         f"- jobs：`python {MANAGER_PATH} --state-dir {base} jobs`",
-        f"- collect：`python {MANAGER_PATH} --state-dir {base} collect`",
+        f"- collect：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
         "",
         "## Worker 总览",
         "",
@@ -586,7 +588,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
             "## 调度总览摘录",
             "",
             "```text",
-            tail_text(schedule_doc_path(base), 160),
+            tail_text(schedule_doc_path(base), 100),
             "```",
             "",
         ]
@@ -1116,6 +1118,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
                 "- Own this experiment branch within the assigned write scope and resources. You may run, diagnose, and iterate experiments without waiting for the coordinator on every small step.",
                 "- Long training/evaluation commands must run as background jobs with clear log files. Immediately register each job through the manager `job-add` command shown in the worker plan.",
                 "- Do not hide the work only inside detached scripts. The tmux Codex pane should show what you are checking, launching, diagnosing, and deciding.",
+                "- Redirect noisy command output to log/artifact files. In the tmux pane, inspect short tails, metric snippets, or focused error excerpts instead of dumping full logs or huge tables.",
                 "- Keep progress updated at launch, after job registration, after failures, after metric checkpoints, and before handoff.",
                 "- Write the final report with commands, logs, metrics, artifacts, failed attempts, changed files, and the next recommended action.",
                 "- Do not modify coordinator-owned registry, status, schedule, or consultation files directly.",
@@ -1127,6 +1130,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
             f"You are a {worker_kind} Codex worker launched by a coordinator in tmux.",
             "Do not revert edits made by the coordinator or other workers. Stay inside the assigned task and report changed files, commands run, results, blockers, and next recommended action before exiting.",
             "Update the progress file at key milestones and before completion. If you produce a longer result, write it into the report file.",
+            "Coordinator context budget: keep progress/report updates and tmux replies concise. Do not paste raw logs, full diffs, long tables, or complete transcripts into coordinator-facing updates; write them to artifact/log files and cite paths with a short summary.",
             "The worker state directory is mounted writable for progress/report/job registration. Do not edit workers.json, status files, schedule files, or registry files manually; use the manager commands when state changes are needed.",
             "Check the inbox directory before major transitions and after coordinator messages; it may contain queued instructions that are also sent through tmux.",
             "If you start any background process, register it with the manager using the job-add command shown in the worker plan.",
@@ -1164,7 +1168,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
             target,
             "Please read and execute this worker prompt file: "
             f"{prompt_file}\n"
-            "Keep the progress file and report file updated, and check the inbox directory for coordinator messages.",
+            "Keep progress/report concise, cite artifact paths for long evidence, and check the inbox directory for coordinator messages.",
         )
 
     registry = load_registry(base)
@@ -1732,6 +1736,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
             f"Inbox directory: {worker.get('inbox_dir')}",
             f"Background jobs file: {worker.get('jobs_file')}",
             "The worker state directory is mounted writable for progress/report/job registration. Do not edit workers.json, status files, schedule files, or registry files manually.",
+            "Coordinator context budget: keep progress/report updates concise, write long evidence to artifact/log files, and cite paths with short summaries.",
             "If this is an autonomous-experiment worker, keep the tmux Codex pane useful as a visible operation trace: briefly state major intent before important actions, register long-running jobs, and update progress/report at checkpoints.",
             "Read those artifacts first, summarize the current state in the progress file, then continue the unfinished task. Do not redo completed work unless necessary.",
         ]
@@ -1871,6 +1876,7 @@ Your job:
 - Keep answers grounded in the local state files. Before each answer, re-read the consultation context and the coordinator schedule.
 - Default to Chinese unless the user asks otherwise.
 - Give concrete paths and commands when helpful.
+- Keep answers compact by default. Summarize long reports/logs and cite paths or manager commands instead of pasting long excerpts.
 
 Hard limits:
 
@@ -1894,8 +1900,8 @@ python {MANAGER_PATH} --state-dir {base} consult-context --print
 python {MANAGER_PATH} --state-dir {base} schedule --print
 python {MANAGER_PATH} --state-dir {base} list
 python {MANAGER_PATH} --state-dir {base} jobs
-python {MANAGER_PATH} --state-dir {base} progress <worker>
-python {MANAGER_PATH} --state-dir {base} capture <worker> --log --lines 160
+python {MANAGER_PATH} --state-dir {base} progress <worker> --lines 40
+python {MANAGER_PATH} --state-dir {base} capture <worker> --log --lines 80
 ```
 
 Current mission:
@@ -1994,7 +2000,7 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
         f"{prompt_file}\n"
         f"Then read the current consultation context: {consult_context_path(base)}\n"
         f"Before every user-facing answer, re-read {consult_context_path(base)} and {schedule_doc_path(base)}. "
-        "Stay read-only and wait for user questions.",
+        "Stay read-only, answer compactly by default, and wait for user questions.",
     )
     print(f"consult worker started at {target}")
     print(f"context={consult_context_path(base)}")
@@ -2160,7 +2166,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     progress = sub.add_parser("progress", help="Show worker progress files.")
     progress.add_argument("name", nargs="?")
-    progress.add_argument("--lines", type=int, default=60)
+    progress.add_argument("--lines", type=int, default=40)
     progress.set_defaults(func=cmd_progress)
 
     job_add = sub.add_parser("job-add", help="Register a background job launched by a worker.")
@@ -2249,7 +2255,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.set_defaults(func=cmd_resume)
 
     collect = sub.add_parser("collect", help="Write a coordinator summary from workers, jobs, reports, and git diffs.")
-    collect.add_argument("--lines", type=int, default=80)
+    collect.add_argument("--lines", type=int, default=40)
     collect.add_argument("--output")
     collect.set_defaults(func=cmd_collect)
 

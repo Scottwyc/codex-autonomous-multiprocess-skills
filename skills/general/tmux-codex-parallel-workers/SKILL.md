@@ -37,18 +37,23 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Treat worker changes as untrusted until inspected by the coordinator.
    - For experiment execution that the user should be able to watch, use `--worker-kind autonomous-experiment` or `--mode interactive`; this opens a visible Codex worker session in tmux with `--no-alt-screen`.
    - `exec` workers are suitable for bounded one-shot tasks, but they are not the preferred mode when the user wants to observe the worker's reasoning and command sequence live.
-6. Use paste-buffer for prompt delivery.
+6. Protect the coordinator context budget.
+   - Worker-facing chat, progress files, report excerpts, supervisor captures, and consultation answers must be concise by default.
+   - Do not paste raw logs, full diffs, long tables, or complete tmux transcripts into coordinator-facing updates. Write long evidence to files and provide paths plus a 5-10 line summary.
+   - Coordinator spot checks should start with `schedule`, `progress --lines 40`, `collect --lines 30`, and short `capture --lines 80` or `capture --lines 120`; increase line counts only for diagnosis.
+   - Keep `COORDINATOR_SCHEDULE.md` and `CONSULT_CONTEXT.md` as summaries with evidence pointers, not scrollback mirrors.
+7. Use paste-buffer for prompt delivery.
    - Multiline instructions must go through the manager's `send` or `interrupt-send`, which uses `tmux set-buffer`, `tmux paste-buffer`, then Enter.
    - If the worker is busy and a new instruction must interrupt it, use `interrupt-send`, which submits the new message first and then sends Escape so Codex switches to the queued instruction immediately.
-7. Use the strongest available worker model by default.
+8. Use the strongest available worker model by default.
    - The manager defaults tmux Codex workers to `gpt-5.5` with `model_reasoning_effort="xhigh"` in this environment.
    - Override globally with `CODEX_WORKER_DEFAULT_MODEL` and `CODEX_WORKER_DEFAULT_REASONING`.
    - Override per worker with `--model` and `--reasoning-effort`, or use `--no-best-model` to fall back to Codex CLI/profile defaults.
-8. Offer a dedicated user consultation window when the user wants to inspect details without interrupting the coordinator.
+9. Offer a dedicated user consultation window when the user wants to inspect details without interrupting the coordinator.
    - Start it with `start-consult`; it runs a read-only Codex process in `cw-consult`.
    - It reads `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` and `COORDINATOR_SCHEDULE.md` before answering.
    - It must answer questions only; execution, recovery, launch, stop, and integration decisions stay with the coordinator or manager commands.
-9. Use the health supervisor for long-lived autonomous runs.
+10. Use the health supervisor for long-lived autonomous runs.
    - Start it with `start-health-supervisor`; it runs in `cw-health-supervisor`.
    - It automatically monitors registered interactive workers and can also monitor the main coordinator pane through `--watch-target main=<tmux-target>`.
    - It auto-recovers only interactive Codex panes. Use `--observe-target` for panes that should be logged but never receive pasted recovery prompts.
@@ -158,11 +163,13 @@ Inspect workers:
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers list
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers schedule
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers consult-context --print
-python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers capture result-audit --lines 160 --log
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers capture result-audit --lines 80 --log
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers progress result-audit
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers jobs
 tmux attach -t codex-workers
 ```
+
+Use larger `--lines` values only when diagnosing a concrete failure. Normal coordination should read schedule/progress/report summaries first and keep long captures on disk.
 
 Send input or stop a worker:
 
@@ -217,7 +224,7 @@ Resume or collect worker state:
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers resume long-eval --mode interactive
-python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers collect
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers collect --lines 30
 ```
 
 Record coordinator scheduling decisions:
@@ -420,7 +427,7 @@ When combined with `long-running-autonomous-project-management`, use tmux worker
    - isolated script fixes
    - independent ablations or evaluations with explicit resource assignment
 3. The coordinator continues the critical path locally.
-4. At each monitoring checkpoint, the coordinator runs `list` and `capture`, reviews worker outputs, integrates safe results, and records decisions in the project follow-up log.
+4. At each monitoring checkpoint, the coordinator runs `list`, `progress --lines 40`, `jobs`, and `collect --lines 30` first; use short `capture --lines 80/120` only when the summaries are not enough.
 5. The coordinator stops stale workers and avoids duplicate jobs.
 
 Do not use tmux workers as a substitute for final review. The coordinator must inspect diffs, logs, metrics, and artifacts before presenting results to the user.

@@ -15,6 +15,8 @@ This repository packages two Codex skills for long-running autonomous work with 
 
 Together, the two skills form an autonomous multiprocess management framework: a main Codex coordinator keeps final judgment and integration authority, while separate tmux Codex workers execute branch tasks in parallel.
 
+The framework also treats the coordinator context window as a limited resource. Worker progress, reports, schedule docs, consultation answers, and supervisor captures are designed to summarize first and point to files for long logs, full diffs, large tables, and tmux transcripts.
+
 ## Repository Layout
 
 ```text
@@ -157,6 +159,7 @@ tmux attach -t codex-workers
 - The coordinator owns task decomposition, final review, integration, and user-facing conclusions.
 - Workers must receive bounded objectives, write scopes, resource ownership, and expected reports.
 - The framework records worker state under `.codex/tmux-workers/` so users can audit launches, inbox messages, progress, reports, captures, jobs, and scheduling decisions.
+- Default coordinator checks should start from `schedule`, `progress --lines 40`, `jobs`, and `collect --lines 30`; larger captures or raw artifacts are for concrete diagnosis or final review.
 - The health supervisor only targets transient Codex pane stalls such as network disconnects or child-process timeout errors. It is not a replacement for debugging quota/auth failures, failed tests, merge conflicts, or bad metrics.
 
 ## License

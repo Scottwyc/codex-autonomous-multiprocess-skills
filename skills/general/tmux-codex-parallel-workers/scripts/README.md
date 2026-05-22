@@ -42,12 +42,18 @@ Common commands:
 
 ```bash
 python "$MANAGER" --state-dir .codex/tmux-workers list
-python "$MANAGER" --state-dir .codex/tmux-workers capture audit-a --lines 160
-python "$MANAGER" --state-dir .codex/tmux-workers progress audit-a
+python "$MANAGER" --state-dir .codex/tmux-workers progress audit-a --lines 40
+python "$MANAGER" --state-dir .codex/tmux-workers capture audit-a --lines 80
 python "$MANAGER" --state-dir .codex/tmux-workers send audit-a "Continue with the summary only."
 python "$MANAGER" --state-dir .codex/tmux-workers interrupt-send audit-a "Stop current expansion and report current state."
-python "$MANAGER" --state-dir .codex/tmux-workers collect
+python "$MANAGER" --state-dir .codex/tmux-workers collect --lines 30
 ```
+
+Context budget defaults:
+
+- `progress` defaults to concise tails; use larger `--lines` only for diagnosis.
+- `COORDINATOR_SCHEDULE.md` and `CONSULT_CONTEXT.md` contain summaries and evidence paths, not full worker transcripts.
+- Noisy outputs should be written to logs/artifacts; workers should cite paths and summarize key evidence.
 
 Long-running monitors:
 
@@ -116,4 +122,3 @@ Important files:
 - `status/health_supervisor.json`: health supervisor status
 - `jobs/<worker>.json`: background job registry
 - `captures/<worker>/`: supervisor captures
-

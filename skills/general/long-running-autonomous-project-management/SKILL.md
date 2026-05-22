@@ -36,11 +36,13 @@ After a target is defined:
    - Use spare GPU or CPU capacity for monitoring, evaluation, data checks, plotting, or documentation.
    - In autonomous follow-up mode, use `tmux-codex-parallel-workers` by default for independent non-blocking branches while the main session remains coordinator.
    - For actual experiment branches, prefer visible `--worker-kind autonomous-experiment` workers by default. The coordinator should assign resources and scope, then monitor and integrate, rather than duplicating the worker's command-by-command execution.
+   - Protect the main session's context window: workers should report summaries, evidence paths, and next actions; raw logs, full diffs, long tables, and tmux transcripts stay in files unless diagnosis requires loading them.
    - Do not launch tmux workers when the user explicitly disables worker parallelism, when `tmux` or `codex` is unavailable, when quota/cost constraints make it inappropriate, or when the next work is tightly coupled and better handled by the coordinator.
 5. Keep a monitoring cadence that matches runtime.
    - Check early and frequently right after launch.
    - Slow down once a run is stable.
    - Keep coordinator-side checks short and bounded. Do not run bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded monitor loops in the main Codex process.
+   - At normal checkpoints, read schedule/progress/report tails and job summaries first. Use short captures only when the summary is insufficient, and load long evidence only for concrete failures, integration review, or explicit user audit.
    - Put persistent monitoring into tmux with `start-supervisor`; use `supervise --once` for coordinator-side spot checks.
    - For long-lived Codex tmux runs, also start `start-health-supervisor` so recoverable network/subprocess stalls in interactive Codex panes are resumed without blocking the coordinator.
 6. Update documents continuously.
@@ -121,8 +123,12 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - expected completion report
 6. Maintain `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` as the user-auditable control document for starts, stops, task assignment, scheduling decisions, and results.
 7. Keep `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` fresh so the consultation worker can answer user questions without interrupting the coordinator.
-8. Keep the coordinator on the critical path while workers run.
-9. At each monitoring checkpoint, list and capture worker outputs, inspect any changed files, integrate safe results, refresh the consultation context, and record the decision in the follow-up file.
+8. Keep the coordinator on the critical path while workers run, and keep the coordinator context lean:
+   - prefer `schedule`, `progress --lines 40`, `jobs`, and `collect --lines 30`;
+   - use `capture --lines 80/120` for recent pane state, not full scrollback;
+   - ask workers to write long evidence to report/artifact/log files and provide paths plus short summaries;
+   - keep consultation-window answers compact and evidence-linked.
+9. At each monitoring checkpoint, inspect worker summaries first, inspect changed files or longer captures only when needed, integrate safe results, refresh the consultation context, and record the decision in the follow-up file.
 10. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux windows accumulate.
 11. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
 12. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.

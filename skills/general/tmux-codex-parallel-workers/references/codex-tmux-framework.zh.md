@@ -137,6 +137,29 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 用户可以 `tmux attach -t codex-workers`，切到 `cw-consult` 窗口直接提问。这样主进程可以继续保持长程自主推进，不必因为状态咨询被频繁打断。
 
+## 2.3 主进程上下文预算
+
+多 worker 并行时，最大的隐性成本是主进程上下文窗口被 worker 输出、日志、长表格和 tmux scrollback 占满。框架的默认通信原则是：
+
+- 主进程只消费摘要、证据路径、阻塞点和下一步，不消费完整日志流。
+- `COORDINATOR_SCHEDULE.md` 和 `CONSULT_CONTEXT.md` 是控制面摘要，不是 tmux transcript 镜像。
+- worker 的 progress 文件保持短小、可恢复，通常不超过 10 条要点：状态、最新结果、证据路径、阻塞点、下一步。
+- report 文件保存较完整但仍经过整理的结论；原始日志、完整表格、完整 diff、大段输出应写入独立 artifact/log 文件，并在 report 中引用路径。
+- interactive/autonomous-experiment worker 的 tmux pane 应展示“意图、短命令、短 tail/指标、判断、下一步”，不要用整屏训练日志或大表格刷屏。
+- 主进程巡检优先使用 `schedule`、`progress --lines 40`、`jobs`、`collect --lines 30`；只有诊断具体异常时才扩大 `capture --lines` 或读取完整 artifact。
+- 咨询 worker 默认也应简洁回答，必要时给出文件路径和命令，让用户自己追溯完整证据。
+
+推荐的信息流是：
+
+```text
+raw logs / full tables / full diffs / tmux transcript
+  -> artifact/log/capture 文件
+  -> worker report 的压缩结论和路径
+  -> progress 的 5-10 行状态
+  -> schedule/consult context 的全局摘要
+  -> 主进程最终判断
+```
+
 ## 3. 基本初始化
 
 在项目根目录执行：
@@ -312,6 +335,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - 自动启动 `cw-supervisor`，除非显式加 `--no-start-supervisor`。
 - 要求 worker 在可见 tmux pane 中说明关键计划、短命令检查、失败诊断、实验启动和阶段性判断。
 - 长训练/评估仍应作为后台 job 运行并通过 `job-add` 注册 PID/log/resource；Codex worker pane 负责展示“为什么跑、如何诊断、下一步是什么”，而不是只展示训练日志。
+- 噪声大的输出应重定向到 log 文件；worker 只在 pane 中读取短 tail、关键指标或错误片段。
 
 用户查看方式：
 
@@ -577,8 +601,10 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  capture long-eval --lines 160
+  capture long-eval --lines 80
 ```
+
+只有当 80-120 行不足以诊断具体问题时，才扩大 `--lines` 或读取 `captures/<worker>/`、`logs/`、worker report 指向的完整 artifact。
 
 查看咨询上下文：
 
@@ -615,7 +641,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
-  collect
+  collect --lines 30
 ```
 
 输出位于：
@@ -650,7 +676,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 5. 每个 worker 声明 owned-path 和 resource。
 6. supervisor 持续 capture、query、stalled 检测。
 7. worker 启动后台任务时 job-add 注册 PID。
-8. 主进程定期 list/progress/jobs/collect。
+8. 主进程定期 list/progress --lines 40/jobs/collect --lines 30，必要时再短 capture。
 9. 主进程用 schedule-note 记录调度判断和下一步 checkpoint，并用 consult-sync 更新咨询窗口。
 10. worker 完成后，主进程 review report、diff、logs、metrics。
 11. 主进程运行必要测试和最终评估。

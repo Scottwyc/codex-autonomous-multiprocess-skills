@@ -39,6 +39,7 @@ Job registry: <state-dir>/jobs/<name>.json
 Git worktree: <path and branch, when enabled>
 Model: <model, default gpt-5.5>
 Reasoning effort: <effort, default xhigh>
+Coordinator context budget: keep coordinator-facing updates short; write long logs, diffs, tables, and transcripts to artifact/report files and cite paths with a short summary.
 ```
 
 ## Coordination Rules
@@ -47,6 +48,10 @@ Reasoning effort: <effort, default xhigh>
 - Avoid overlapping write scopes. If overlap is unavoidable, keep one worker read-only.
 - Keep the coordinator responsible for final merge, judgment, and user-facing conclusions.
 - Keep `COORDINATOR_SCHEDULE.md` current; users should be able to audit worker purpose, resource ownership, results, and next decisions from that single document.
+- Treat the main coordinator's context window as a scarce shared resource. Summarize, cite paths, and avoid pasting raw evidence unless the coordinator explicitly asks.
+- Worker progress updates should normally fit in 10 bullets or fewer: status, latest result, evidence paths, blockers, next action.
+- Use progress files for restartable state, reports for concise evidence summaries, and separate artifact/log files for raw outputs, long tables, full diffs, and transcripts.
+- Coordinator checks should prefer `schedule`, `progress --lines 40`, `collect --lines 30`, and short `capture --lines 80/120`; larger captures are for failure diagnosis only.
 - Record each worker's model and reasoning effort in the schedule; default to the manager's strongest available setting unless cost/quota/speed requires an explicit override.
 - Execution workers run with the worker state directory mounted through Codex CLI `--add-dir` when using `workspace-write`. This prevents git-worktree workers from treating `.codex/tmux-workers/progress` and `.codex/tmux-workers/reports` as read-only because those files live outside the worker `--cd` root.
 - Prefer `codex exec` workers for unattended one-shot tasks.
@@ -79,6 +84,7 @@ It should:
 - answer questions about the current mission, worker tasks, scheduling decisions, resources, logs, reports, evidence paths, blockers, and next checkpoints
 - default to Chinese unless the user asks otherwise
 - give concrete file paths and manager commands for user audit
+- answer compactly by default; summarize long reports or logs and cite paths instead of dumping them into the chat
 - state missing evidence clearly instead of guessing
 
 It must not:
@@ -93,6 +99,7 @@ It must not:
 - Do not launch workers that compete for the same GPU, port, result directory, checkpoint path, or database migration unless the resource split is explicit.
 - For GPU experiments, assign device IDs or scheduler constraints in the worker prompt and launch command.
 - For autonomous experiment workers, prefer visible `interactive` mode. The worker should keep the tmux Codex pane useful for review by briefly stating major intent before important actions and by running short inspections visibly.
+- Redirect noisy command output to log files and inspect short tails or metric snippets visibly; do not fill the tmux pane with full training logs, full diffs, or huge tables.
 - For repository edits, ask each worker to list changed files and never revert unrelated changes.
 - Stop stale or duplicate workers before launching replacements.
 - Use manager-level `--owned-path` and `--resource` declarations so conflicts are visible before launch.
@@ -114,6 +121,7 @@ It may:
 It must:
 
 - keep the tmux Codex pane readable as an operation trace
+- keep the visible operation trace concise: intent, command, short tail or metric, decision, next step
 - register long-running jobs with `job-add`
 - update progress after launches, failures, metric checkpoints, and handoff
 - write a final report with commands, logs, metrics, artifacts, failed attempts, changed files, and next recommendation
@@ -142,7 +150,7 @@ Status: running | waiting | blocked | completed
 - Changed files: ...
 ```
 
-Use the report file for longer summaries, metric tables, and final conclusions.
+Keep the progress file short enough for quick coordinator reads. Use the report file for longer summaries, compact metric tables, and final conclusions; put raw logs, full tables, full diffs, and large transcripts in separate files and link them.
 
 ## Completion Requirements
 
@@ -153,4 +161,5 @@ Before exiting, a worker should:
 - list changed files and commands run
 - state whether any background job remains active and record its PID/log path
 - summarize git changes if working in a git worktree
+- keep the final coordinator-facing handoff concise: status, result, changed files, evidence paths, blockers or next action
 - avoid closing or deleting artifacts needed by the coordinator
