@@ -1,4 +1,4 @@
 interface:
   display_name: "Tmux Codex Parallel Workers"
   short_description: "Manage hierarchical Codex workers in tmux"
-  default_prompt: "Use $tmux-codex-parallel-workers to launch parallel Codex workers, subordinate branch-manager workers, manager-mediated peer messages, persistent supervisors, registered-coordinator recovery, and bounded coordinator-side checks."
+  default_prompt: "Use $tmux-codex-parallel-workers to launch parallel Codex workers, subordinate branch-manager workers, manager-mediated peer messages, persistent supervisors, compact coordinator memory, registered-coordinator recovery, and bounded coordinator-side checks."

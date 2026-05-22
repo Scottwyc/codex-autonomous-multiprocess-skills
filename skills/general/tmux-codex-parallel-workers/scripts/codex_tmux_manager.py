@@ -99,6 +99,18 @@ def coordinator_handoff_path(base: Path) -> Path:
     return base / "COORDINATOR_RECOVERY.md"
 
 
+def coordinator_memory_path(base: Path) -> Path:
+    return base / "COORDINATOR_MEMORY.md"
+
+
+def coordinator_context_pack_path(base: Path) -> Path:
+    return base / "COORDINATOR_CONTEXT_PACK.md"
+
+
+def coordinator_memory_events_path(base: Path) -> Path:
+    return base / "coordinator_memory_events.jsonl"
+
+
 def coordinator_status_path(base: Path) -> Path:
     return base / "status" / "coordinator.json"
 
@@ -238,6 +250,279 @@ def load_peer_messages(base: Path, limit: int = 40) -> list[dict[str, Any]]:
     return records
 
 
+def append_memory_event(
+    base: Path,
+    event: str,
+    *,
+    note: str = "",
+    decision: str = "",
+    next_action: str = "",
+    reason: str = "",
+) -> None:
+    record = {
+        "timestamp": now_iso(),
+        "event": event,
+        "reason": reason,
+        "note": note,
+        "decision": decision,
+        "next_action": next_action,
+    }
+    append_text(coordinator_memory_events_path(base), json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def load_memory_events(base: Path, limit: int = 40) -> list[dict[str, Any]]:
+    path = coordinator_memory_events_path(base)
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]:
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def worker_latest_summary(worker: dict[str, Any], *, progress_lines: int = 5, report_lines: int = 5, limit: int = 220) -> str:
+    progress = one_line(tail_text(Path(worker.get("progress_file", "")), progress_lines), limit)
+    report = one_line(tail_text(Path(worker.get("report_file", "")), report_lines), limit)
+    if progress == "missing" and report == "missing":
+        return "missing progress/report"
+    if report != "missing" and "Pending" not in report:
+        return report
+    return progress
+
+
+def render_coordinator_memory(
+    base: Path,
+    registry: dict[str, Any],
+    *,
+    reason: str = "refresh",
+    progress_lines: int = 5,
+    report_lines: int = 5,
+    event_limit: int = 14,
+    peer_limit: int = 10,
+    memory_event_limit: int = 12,
+) -> str:
+    workers = registry.get("workers", {})
+    coordinator = registry.get("coordinator") or {}
+    mission = registry.get("mission", "未设置")
+    session = registry.get("session", DEFAULT_SESSION)
+    active_rows: list[list[str]] = []
+    resource_rows: list[list[str]] = []
+    path_rows: list[list[str]] = []
+    for name, worker in sorted(workers.items()):
+        state = effective_state(worker, session)
+        if state == "stopped":
+            continue
+        active_rows.append(
+            [
+                name,
+                state,
+                worker.get("worker_kind", "standard"),
+                worker.get("parent_worker") or "main",
+                ", ".join(worker.get("resources", [])) or "-",
+                worker_latest_summary(worker, progress_lines=progress_lines, report_lines=report_lines, limit=220),
+            ]
+        )
+        resources = ", ".join(worker.get("resources", [])) or "-"
+        owned = ", ".join(worker.get("owned_paths", [])) or "-"
+        resource_rows.append([name, resources, owned])
+        path_rows.append(
+            [
+                name,
+                worker.get("progress_file", "-"),
+                worker.get("report_file", "-"),
+                worker.get("jobs_file", "-"),
+            ]
+        )
+
+    memory_events = load_memory_events(base, memory_event_limit)
+    schedule_events = load_schedule_events(base, event_limit)
+    peer_messages = load_peer_messages(base, peer_limit)
+    lines = [
+        "# Coordinator Compact Memory",
+        "",
+        f"Updated: {now_iso()}",
+        f"Reason: {reason}",
+        f"State dir: `{base}`",
+        f"Mission: {mission}",
+        "",
+        "This file is the coordinator's short working memory. Prefer reading it before larger schedule, collect, capture, log, or report files.",
+        "",
+        "## Context Discipline",
+        "",
+        "- Use this compact memory and `COORDINATOR_CONTEXT_PACK.md` as the first source after every monitoring checkpoint or thread restart.",
+        "- Do not paste raw logs, full diffs, full reports, long tables, or full tmux transcripts into the main coordinator context.",
+        "- Escalate from compact memory -> schedule -> progress/report tails -> short capture -> full artifact only when needed.",
+        "- After meaningful decisions, run `compact-memory --note ... --decision ... --next-action ...` so the next coordinator does not rely on chat history.",
+        "",
+        "## Coordinator",
+        "",
+    ]
+    if coordinator:
+        target = coordinator.get("target", "")
+        lines.extend(
+            [
+                f"- target: `{target or '-'}`",
+                f"- target_state: `{'running' if target and tmux_target_present(target) else 'not-present'}`",
+                f"- cwd: `{coordinator.get('cwd', '-')}`",
+                f"- model/reasoning: `{coordinator.get('model', '-')}/{coordinator.get('reasoning_effort', '-')}`",
+                f"- recovery handoff: `{coordinator_handoff_path(base)}`",
+            ]
+        )
+    else:
+        lines.append("- coordinator target not registered")
+
+    lines.extend(["", "## Active Worker Snapshot", ""])
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "资源", "最新短摘要"], active_rows) if active_rows else "暂无 active worker。")
+    lines.extend(["", "## Recent Coordinator Memory Notes", ""])
+    if memory_events:
+        lines.append(
+            markdown_table(
+                ["时间", "事件", "原因", "笔记", "决策", "下一步"],
+                [
+                    [
+                        item.get("timestamp", ""),
+                        item.get("event", ""),
+                        item.get("reason", ""),
+                        one_line(item.get("note", ""), 120),
+                        one_line(item.get("decision", ""), 120),
+                        one_line(item.get("next_action", ""), 120),
+                    ]
+                    for item in memory_events
+                ],
+            )
+        )
+    else:
+        lines.append("暂无主进程压缩记忆笔记。")
+
+    lines.extend(["", "## Recent Schedule Decisions", ""])
+    if schedule_events:
+        lines.append(
+            markdown_table(
+                ["时间", "事件", "Worker", "说明"],
+                [[event.get("timestamp", ""), event.get("event", ""), event.get("worker", ""), one_line(event.get("detail", ""), 160)] for event in schedule_events],
+            )
+        )
+    else:
+        lines.append("暂无调度事件。")
+
+    lines.extend(["", "## Recent Peer Messages", ""])
+    if peer_messages:
+        lines.append(
+            markdown_table(
+                ["时间", "来源", "目标", "摘要"],
+                [[item.get("timestamp", ""), item.get("source", ""), item.get("target", ""), one_line(item.get("summary", ""), 140)] for item in peer_messages],
+            )
+        )
+    else:
+        lines.append("暂无 worker 横向消息。")
+
+    lines.extend(["", "## Resource And Ownership Snapshot", ""])
+    lines.append(markdown_table(["Worker", "资源", "Owned paths"], resource_rows) if resource_rows else "暂无资源声明。")
+
+    lines.extend(["", "## Evidence Pointers", ""])
+    lines.append(markdown_table(["Worker", "Progress", "Report", "Jobs"], path_rows) if path_rows else "暂无 worker evidence。")
+
+    lines.extend(
+        [
+            "",
+            "## First Commands For The Coordinator",
+            "",
+            "```bash",
+            f"python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack",
+            f"python {MANAGER_PATH} --state-dir {base} list",
+            f"python {MANAGER_PATH} --state-dir {base} jobs",
+            f"python {MANAGER_PATH} --state-dir {base} progress --lines 20",
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_coordinator_context_pack(base: Path, registry: dict[str, Any], *, reason: str = "refresh") -> str:
+    workers = registry.get("workers", {})
+    coordinator = registry.get("coordinator") or {}
+    mission = registry.get("mission", "未设置")
+    session = registry.get("session", DEFAULT_SESSION)
+    rows = []
+    for name, worker in sorted(workers.items()):
+        state = effective_state(worker, session)
+        if state == "stopped":
+            continue
+        rows.append(
+            [
+                name,
+                state,
+                worker.get("worker_kind", "standard"),
+                worker.get("parent_worker") or "main",
+                ", ".join(worker.get("resources", [])) or "-",
+                one_line(worker_latest_summary(worker, progress_lines=3, report_lines=3, limit=140), 140),
+            ]
+        )
+    latest_memory = load_memory_events(base, 5)
+    lines = [
+        "# Coordinator Context Pack",
+        "",
+        f"Updated: {now_iso()}",
+        f"Reason: {reason}",
+        f"Mission: {mission}",
+        f"State dir: `{base}`",
+        f"Coordinator target: `{coordinator.get('target', '-') if coordinator else '-'}`",
+        "",
+        "Use this as the short reload packet when the coordinator context is getting large. Read larger files only by path when needed.",
+        "",
+        "## Active Workers",
+        "",
+    ]
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "资源", "短摘要"], rows) if rows else "暂无 active worker。")
+    lines.extend(["", "## Latest Memory Notes", ""])
+    if latest_memory:
+        for item in latest_memory:
+            pieces = [item.get("timestamp", ""), item.get("event", "")]
+            if item.get("decision"):
+                pieces.append("decision=" + one_line(item.get("decision", ""), 100))
+            if item.get("next_action"):
+                pieces.append("next=" + one_line(item.get("next_action", ""), 100))
+            if item.get("note"):
+                pieces.append("note=" + one_line(item.get("note", ""), 100))
+            lines.append("- " + " | ".join(part for part in pieces if part))
+    else:
+        lines.append("- No compact memory notes yet.")
+    lines.extend(
+        [
+            "",
+            "## Load Order",
+            "",
+            f"1. `{coordinator_context_pack_path(base)}`",
+            f"2. `{coordinator_memory_path(base)}`",
+            f"3. `{schedule_doc_path(base)}` only for audit detail",
+            "4. Worker progress/report/jobs/captures only for concrete diagnosis or final review",
+            "",
+            "## Commands",
+            "",
+            "```bash",
+            f"python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack",
+            f"python {MANAGER_PATH} --state-dir {base} compact-memory --note '<short current state>' --decision '<decision>' --next-action '<next checkpoint>'",
+            f"python {MANAGER_PATH} --state-dir {base} collect --lines 20",
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def refresh_compact_memory(base: Path, registry: dict[str, Any] | None = None, *, reason: str = "refresh") -> tuple[Path, Path]:
+    registry = registry or load_registry(base)
+    memory_path = coordinator_memory_path(base)
+    context_pack_path = coordinator_context_pack_path(base)
+    write_text(memory_path, render_coordinator_memory(base, registry, reason=reason))
+    write_text(context_pack_path, render_coordinator_context_pack(base, registry, reason=reason))
+    return memory_path, context_pack_path
+
+
 def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str = "refresh") -> str:
     workers = registry.get("workers", {})
     coordinator = registry.get("coordinator") or {}
@@ -295,14 +580,16 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
             "",
             "1. Use the `long-running-autonomous-project-management` and `tmux-codex-parallel-workers` skills.",
             "2. Treat this as a resumed coordinator session, not a new project. Do not restart existing workers from scratch.",
-            "3. First inspect the durable control plane: schedule, worker registry, progress/report tails, jobs, branch-manager summaries, peer messages, and consultation context.",
+            "3. First inspect the compact durable control plane: context pack, compact memory, schedule, worker registry, progress/report tails, jobs, branch-manager summaries, peer messages, and consultation context.",
             "4. Reconstruct the active mission, active workers, branch-manager hierarchy, resource ownership, blockers, and next checkpoints.",
             "5. Record a `schedule-note` that coordinator recovery happened, then continue normal autonomous supervision and integration.",
-            "6. Keep the recovered coordinator context lean: consume summaries and evidence paths first; load long logs only for concrete diagnosis or final review.",
+            "6. Keep the recovered coordinator context lean: consume `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` first; load long logs only for concrete diagnosis or final review.",
             "",
             "## First Commands",
             "",
             "```bash",
+            f"python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack",
+            f"python {MANAGER_PATH} --state-dir {base} compact-memory --print",
             f"python {MANAGER_PATH} --state-dir {base} schedule --print",
             f"python {MANAGER_PATH} --state-dir {base} list",
             f"python {MANAGER_PATH} --state-dir {base} jobs",
@@ -330,6 +617,16 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
                 "",
             ]
         )
+    lines.extend(
+        [
+            "## Coordinator Memory Files",
+            "",
+            f"- Context pack: `{coordinator_context_pack_path(base)}`",
+            f"- Compact memory: `{coordinator_memory_path(base)}`",
+            f"- Recovery handoff: `{coordinator_handoff_path(base)}`",
+            "",
+        ]
+    )
     lines.extend(["## Recent Schedule Events", ""])
     if events:
         lines.append(
@@ -609,6 +906,15 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## 主进程压缩记忆",
+            "",
+            f"- 短上下文包：`{coordinator_context_pack_path(base)}`",
+            f"- 主进程压缩记忆：`{coordinator_memory_path(base)}`",
+            f"- 压缩记忆事件：`{coordinator_memory_events_path(base)}`",
+            f"- 刷新并查看短包：`python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack`",
+            f"- 写入关键决策：`python {MANAGER_PATH} --state-dir {base} compact-memory --note '<short state>' --decision '<decision>' --next-action '<next checkpoint>'`",
+            "- 主进程应优先读取短上下文包和压缩记忆；只有审查、诊断或最终收口时才读取完整 schedule、collect、capture、log 或 report。",
+            "",
             "## 用户咨询窗口",
             "",
         ]
@@ -642,6 +948,8 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             f"- 查看 jobs：`python {MANAGER_PATH} --state-dir {base} jobs`",
             f"- 查看 worker 横向消息：`{peer_messages_path(base)}`",
             f"- 查看咨询上下文：`python {MANAGER_PATH} --state-dir {base} consult-context --print`",
+            f"- 查看短上下文包：`python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack`",
+            f"- 查看压缩记忆：`python {MANAGER_PATH} --state-dir {base} compact-memory --print`",
             f"- 查看主进程接管 handoff：`{coordinator_handoff_path(base)}`",
             f"- 汇总收口：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
             f"- 连接 tmux：`tmux attach -t {session}`",
@@ -811,6 +1119,8 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         f"调度事件：`{schedule_events_path(base)}`",
         f"worker 横向消息：`{peer_messages_path(base)}`",
         f"主进程接管 handoff：`{coordinator_handoff_path(base)}`",
+        f"主进程短上下文包：`{coordinator_context_pack_path(base)}`",
+        f"主进程压缩记忆：`{coordinator_memory_path(base)}`",
         f"注册主进程 target：`{coordinator.get('target', '-') if coordinator else '-'}`",
         "",
         "## 咨询 worker 规则",
@@ -826,6 +1136,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         "",
         f"- 咨询上下文：`python {MANAGER_PATH} --state-dir {base} consult-context --print`",
         f"- 调度总览：`python {MANAGER_PATH} --state-dir {base} schedule --print`",
+        f"- 短上下文包：`python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack`",
         f"- worker 列表：`python {MANAGER_PATH} --state-dir {base} list`",
         f"- jobs：`python {MANAGER_PATH} --state-dir {base} jobs`",
         f"- collect：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
@@ -885,6 +1196,7 @@ def refresh_schedule_doc(base: Path, registry: dict[str, Any] | None = None) -> 
     registry = registry or load_registry(base)
     path = schedule_doc_path(base)
     write_text(path, render_schedule_doc(base, registry))
+    refresh_compact_memory(base, registry)
     refresh_consult_context(base, registry)
     write_coordinator_handoff(base, registry)
     return path
@@ -1473,20 +1785,25 @@ Use the `long-running-autonomous-project-management` and `tmux-codex-parallel-wo
 
 Immediate recovery protocol:
 
-1. Read the handoff file: {handoff}
-2. Read the schedule: {schedule_doc_path(base)}
-3. Inspect existing workers with:
+1. Read the shortest context pack first: {coordinator_context_pack_path(base)}
+2. Read the compact coordinator memory: {coordinator_memory_path(base)}
+3. Read the handoff file: {handoff}
+4. Read the schedule only when the compact memory is insufficient: {schedule_doc_path(base)}
+5. Inspect existing workers with:
    python {MANAGER_PATH} --state-dir {base} list
    python {MANAGER_PATH} --state-dir {base} jobs
-   python {MANAGER_PATH} --state-dir {base} collect --lines 30
-4. Reconstruct the mission, active workers, branch-manager hierarchy, resource ownership, open blockers, and next checkpoints from durable files.
-5. Do not restart existing workers from scratch. Resume, redirect, stop, or collect them only after checking their progress/report/jobs.
-6. Record the recovery with schedule-note, refresh consult context, and continue coordinating until the objective is complete or the user explicitly stops autonomous follow-up.
-7. Keep coordinator context lean: consume schedule/progress/report summaries first, and only load long logs or full captures when needed for diagnosis or final review.
+   python {MANAGER_PATH} --state-dir {base} progress --lines 20
+   python {MANAGER_PATH} --state-dir {base} collect --lines 20
+6. Reconstruct the mission, active workers, branch-manager hierarchy, resource ownership, open blockers, and next checkpoints from durable files.
+7. Do not restart existing workers from scratch. Resume, redirect, stop, or collect them only after checking their progress/report/jobs.
+8. Record the recovery with schedule-note and compact-memory, refresh consult context, and continue coordinating until the objective is complete or the user explicitly stops autonomous follow-up.
+9. Keep coordinator context lean: consume context pack and compact memory first, and only load long logs or full captures when needed for diagnosis or final review.
 
 Key files:
 
 - State dir: {base}
+- Context pack: {coordinator_context_pack_path(base)}
+- Compact memory: {coordinator_memory_path(base)}
 - Handoff: {handoff}
 - Schedule: {schedule_doc_path(base)}
 - Consultation context: {consult_context_path(base)}
@@ -1532,7 +1849,8 @@ Key files:
         target,
         "Please read and execute this coordinator recovery prompt file: "
         f"{prompt_file}\n"
-        f"Start by reading the handoff file: {handoff}\n"
+        f"Start with the short context pack: {coordinator_context_pack_path(base)}\n"
+        f"Then read the recovery handoff file: {handoff}\n"
         "Continue the existing autonomous multiprocess run; do not restart workers from scratch.",
     )
 
@@ -2493,6 +2811,49 @@ def cmd_collect(args: argparse.Namespace) -> None:
     print(out)
 
 
+def cmd_compact_memory(args: argparse.Namespace) -> None:
+    base = state_dir(args.state_dir)
+    registry = load_registry(base)
+    if args.mission:
+        registry["mission"] = args.mission
+        registry["updated_at"] = now_iso()
+        save_registry(base, registry)
+    has_note = any([args.note, args.decision, args.next_action, args.mission])
+    if has_note:
+        append_memory_event(
+            base,
+            "compact-memory",
+            note=args.note or "",
+            decision=args.decision or "",
+            next_action=args.next_action or "",
+            reason=args.reason,
+        )
+        append_schedule_event(
+            base,
+            "compact-memory",
+            detail="; ".join(
+                part
+                for part in [
+                    f"reason={args.reason}" if args.reason else "",
+                    f"note={one_line(args.note or '', 120)}" if args.note else "",
+                    f"decision={one_line(args.decision or '', 120)}" if args.decision else "",
+                    f"next={one_line(args.next_action or '', 120)}" if args.next_action else "",
+                    f"mission={one_line(args.mission or '', 120)}" if args.mission else "",
+                ]
+                if part
+            ),
+        )
+    memory_path, context_pack_path = refresh_compact_memory(base, registry, reason=args.reason)
+    refresh_consult_context(base, registry)
+    write_coordinator_handoff(base, registry, reason=f"compact-memory:{args.reason}")
+    if args.print:
+        target = context_pack_path if args.context_pack else memory_path
+        print(target.read_text(encoding="utf-8", errors="replace"))
+    else:
+        print(f"memory={memory_path}")
+        print(f"context_pack={context_pack_path}")
+
+
 def cmd_schedule(args: argparse.Namespace) -> None:
     base = state_dir(args.state_dir)
     registry = load_registry(base)
@@ -2526,6 +2887,15 @@ def cmd_schedule_note(args: argparse.Namespace) -> None:
         worker=safe_name(args.worker) if args.worker else None,
         detail=detail or f"Mission updated: {args.mission}",
     )
+    if args.note or args.decision or args.next_action or args.mission:
+        append_memory_event(
+            base,
+            "schedule-note",
+            note=args.note or (f"Mission updated: {args.mission}" if args.mission else ""),
+            decision=args.decision or "",
+            next_action=args.next_action or "",
+            reason=args.event,
+        )
     path = refresh_schedule_doc(base, registry)
     print(path)
 
@@ -2973,6 +3343,16 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--lines", type=int, default=40)
     collect.add_argument("--output")
     collect.set_defaults(func=cmd_collect)
+
+    compact_memory = sub.add_parser("compact-memory", help="Refresh compact coordinator memory and context pack.")
+    compact_memory.add_argument("--reason", default="manual")
+    compact_memory.add_argument("--note", help="Short coordinator memory note to preserve outside chat history.")
+    compact_memory.add_argument("--decision", help="Short decision to preserve outside chat history.")
+    compact_memory.add_argument("--next-action", help="Short next checkpoint/action to preserve outside chat history.")
+    compact_memory.add_argument("--mission", help="Optional mission update before compacting memory.")
+    compact_memory.add_argument("--print", action="store_true", help="Print the refreshed memory file.")
+    compact_memory.add_argument("--context-pack", action="store_true", help="With --print, print the shorter context pack instead of full compact memory.")
+    compact_memory.set_defaults(func=cmd_compact_memory)
 
     schedule = sub.add_parser("schedule", help="Refresh and show the coordinator scheduling document path.")
     schedule.add_argument("--print", action="store_true", help="Print the scheduling document content.")

@@ -1,6 +1,6 @@
 ---
 name: tmux-codex-parallel-workers
-description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in tmux windows for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-window autonomous workers, visible autonomous experiment workers, subordinate branch-manager workers, manager-mediated worker-to-worker communication, a read-only user consultation window, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
+description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in tmux windows for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-window autonomous workers, visible autonomous experiment workers, subordinate branch-manager workers, manager-mediated worker-to-worker communication, compact coordinator memory/context packs, a read-only user consultation window, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
 ---
 
 # Tmux Codex Parallel Workers
@@ -42,8 +42,9 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
 6. Protect the coordinator context budget.
    - Worker-facing chat, progress files, report excerpts, supervisor captures, and consultation answers must be concise by default.
    - Do not paste raw logs, full diffs, long tables, or complete tmux transcripts into coordinator-facing updates. Write long evidence to files and provide paths plus a 5-10 line summary.
-   - Coordinator spot checks should start with `schedule`, `progress --lines 40`, `collect --lines 30`, and short `capture --lines 80` or `capture --lines 120`; increase line counts only for diagnosis.
-   - Keep `COORDINATOR_SCHEDULE.md` and `CONSULT_CONTEXT.md` as summaries with evidence pointers, not scrollback mirrors.
+   - Coordinator spot checks should start with `compact-memory --print --context-pack`, `compact-memory --print`, `list`, `jobs`, and `progress --lines 20`; use `schedule`, `collect --lines 20/30`, and short `capture --lines 80` only when summaries are insufficient.
+   - Keep `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as the coordinator's short reload memory, `COORDINATOR_SCHEDULE.md` as the audit/control document, and `CONSULT_CONTEXT.md` as the user-consultation summary. None of them should become raw scrollback mirrors.
+   - After important decisions, run `compact-memory --note ... --decision ... --next-action ...` so the next checkpoint or recovered coordinator can continue from files rather than chat history.
 7. Use paste-buffer for prompt delivery.
    - Multiline instructions must go through the manager's `send` or `interrupt-send`, which uses `tmux set-buffer`, `tmux paste-buffer`, then Enter.
    - If the worker is busy and a new instruction must interrupt it, use `interrupt-send`, which submits the new message first and then sends Escape so Codex switches to the queued instruction immediately.
@@ -238,6 +239,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 Inspect workers:
 
 ```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --print --context-pack
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --note "Current branch manager reports are stable." --decision "Wait for running jobs before launching more workers." --next-action "Check jobs and compact memory at the next checkpoint."
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers list
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers schedule
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers consult-context --print
@@ -397,6 +400,13 @@ The manager refreshes this document after major operations: `init`, `launch`, `s
 
 The manager also refreshes `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` whenever it refreshes the schedule. This context is optimized for the dedicated user consultation worker and includes the mission, worker overview, key file paths, recent scheduling events, and a schedule excerpt.
 
+The manager also maintains two smaller coordinator-memory files:
+
+- `.codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md`: the shortest reload packet for the main coordinator.
+- `.codex/tmux-workers/COORDINATOR_MEMORY.md`: compact working memory with active workers, latest summaries, recent decisions, peer messages, resources, and evidence paths.
+
+Use `compact-memory --print --context-pack` before routine checkpoints, and use `compact-memory --note ... --decision ... --next-action ...` after meaningful coordination decisions. This is the main mechanism for reducing pressure on the model context window.
+
 Use `schedule-note` whenever the coordinator makes a non-obvious decision, such as launching a worker, changing resource allocation, accepting a result, deferring a merge, recovering a stalled worker, or stopping a job. The document should let a user answer:
 
 - which workers exist and why they were launched
@@ -511,7 +521,7 @@ When combined with `long-running-autonomous-project-management`, use tmux worker
    - isolated script fixes
    - independent ablations or evaluations with explicit resource assignment
 3. The coordinator continues the critical path locally.
-4. At each monitoring checkpoint, the coordinator runs `list`, `progress --lines 40`, `jobs`, and `collect --lines 30` first; use short `capture --lines 80/120` only when the summaries are not enough.
+4. At each monitoring checkpoint, the coordinator runs `compact-memory --print --context-pack`, `list`, `jobs`, and `progress --lines 20` first. Use `schedule`, `collect --lines 20/30`, and short `capture --lines 80/120` only when the compact summaries are not enough.
 5. The coordinator stops stale workers and avoids duplicate jobs.
 
 Do not use tmux workers as a substitute for final review. The coordinator must inspect diffs, logs, metrics, and artifacts before presenting results to the user.

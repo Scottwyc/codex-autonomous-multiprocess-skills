@@ -15,6 +15,7 @@ Responsibilities:
 - write manager-mediated `peer-send` messages between workers
 - write worker prompts, progress files, reports, status files, logs, inbox messages, and job registries
 - maintain `COORDINATOR_SCHEDULE.md`
+- maintain `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as compact coordinator memory
 - maintain `COORDINATOR_RECOVERY.md` and restart a registered main coordinator after context-window exhaustion
 - start read-only consultation workers
 - start/stop the normal supervisor and health supervisor
@@ -73,7 +74,9 @@ Common commands:
 
 ```bash
 python "$MANAGER" --state-dir .codex/tmux-workers list
-python "$MANAGER" --state-dir .codex/tmux-workers progress audit-a --lines 40
+python "$MANAGER" --state-dir .codex/tmux-workers compact-memory --print --context-pack
+python "$MANAGER" --state-dir .codex/tmux-workers compact-memory --note "Audit branch is waiting on metrics." --decision "Do not launch duplicate audit workers." --next-action "Check jobs and compact memory at next checkpoint."
+python "$MANAGER" --state-dir .codex/tmux-workers progress audit-a --lines 20
 python "$MANAGER" --state-dir .codex/tmux-workers capture audit-a --lines 80
 python "$MANAGER" --state-dir .codex/tmux-workers send audit-a "Continue with the summary only."
 python "$MANAGER" --state-dir .codex/tmux-workers interrupt-send audit-a "Stop current expansion and report current state."
@@ -102,7 +105,7 @@ python "$MANAGER" \
   --restart-main-when-missing
 ```
 
-If the registered coordinator pane shows `Codex ran out of room in the model's context window`, or the registered coordinator target disappears while `--restart-main-when-missing` is enabled, the health supervisor calls `recover-coordinator`, refreshes `COORDINATOR_RECOVERY.md`, closes the old pane by default when present, and launches a new coordinator window. The recovered coordinator starts from the schedule, worker registry, progress/report files, jobs, peer messages, branch-manager summaries, and consultation context.
+If the registered coordinator pane shows `Codex ran out of room in the model's context window`, or the registered coordinator target disappears while `--restart-main-when-missing` is enabled, the health supervisor calls `recover-coordinator`, refreshes `COORDINATOR_RECOVERY.md`, closes the old pane by default when present, and launches a new coordinator window. The recovered coordinator starts from `COORDINATOR_CONTEXT_PACK.md`, `COORDINATOR_MEMORY.md`, the schedule, worker registry, progress/report files, jobs, peer messages, branch-manager summaries, and consultation context.
 
 Manual recovery:
 
@@ -116,7 +119,9 @@ python "$MANAGER" \
 Context budget defaults:
 
 - `progress` defaults to concise tails; use larger `--lines` only for diagnosis.
+- `COORDINATOR_CONTEXT_PACK.md` is the shortest reload packet; `COORDINATOR_MEMORY.md` is the coordinator's compact working memory.
 - `COORDINATOR_SCHEDULE.md` and `CONSULT_CONTEXT.md` contain summaries and evidence paths, not full worker transcripts.
+- Run `compact-memory --note ... --decision ... --next-action ...` after meaningful coordinator decisions so later checkpoints do not rely on chat history.
 - Noisy outputs should be written to logs/artifacts; workers should cite paths and summarize key evidence.
 
 Long-running monitors:
@@ -186,8 +191,11 @@ Runtime state is written under the selected `--state-dir`, normally:
 Important files:
 
 - `workers.json`: worker registry
+- `COORDINATOR_CONTEXT_PACK.md`: shortest reload packet for the main coordinator
+- `COORDINATOR_MEMORY.md`: compact coordinator working memory
 - `COORDINATOR_SCHEDULE.md`: user-auditable coordinator plan
 - `COORDINATOR_RECOVERY.md`: restart handoff for a recovered main coordinator
+- `coordinator_memory_events.jsonl`: append-only compact memory notes and decisions
 - `schedule_events.jsonl`: coordinator and supervisor events
 - `peer_messages.jsonl`: manager-owned worker-to-worker message log
 - `progress/<worker>.md`: worker progress

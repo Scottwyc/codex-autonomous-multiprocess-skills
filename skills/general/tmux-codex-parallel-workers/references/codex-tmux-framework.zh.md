@@ -29,8 +29,11 @@
   |     |
   |     |-- .codex/tmux-workers/
   |           |-- workers.json             -> worker registry
+  |           |-- COORDINATOR_CONTEXT_PACK.md -> 主进程最短上下文包
+  |           |-- COORDINATOR_MEMORY.md    -> 主进程压缩工作记忆
   |           |-- COORDINATOR_SCHEDULE.md  -> 主进程调度总览文档
   |           |-- COORDINATOR_RECOVERY.md  -> 主进程重启接管 handoff
+  |           |-- coordinator_memory_events.jsonl -> 压缩记忆事件
   |           |-- schedule_events.jsonl     -> 调度事件日志
   |           |-- peer_messages.jsonl       -> worker 横向消息日志
   |           |-- consult/
@@ -162,11 +165,12 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 多 worker 并行时，最大的隐性成本是主进程上下文窗口被 worker 输出、日志、长表格和 tmux scrollback 占满。框架的默认通信原则是：
 
 - 主进程只消费摘要、证据路径、阻塞点和下一步，不消费完整日志流。
-- `COORDINATOR_SCHEDULE.md` 和 `CONSULT_CONTEXT.md` 是控制面摘要，不是 tmux transcript 镜像。
+- `COORDINATOR_CONTEXT_PACK.md` 是最短重载包，`COORDINATOR_MEMORY.md` 是主进程压缩工作记忆，`COORDINATOR_SCHEDULE.md` 是审计型调度总览，`CONSULT_CONTEXT.md` 是用户咨询上下文；它们都不是 tmux transcript 镜像。
 - worker 的 progress 文件保持短小、可恢复，通常不超过 10 条要点：状态、最新结果、证据路径、阻塞点、下一步。
 - report 文件保存较完整但仍经过整理的结论；原始日志、完整表格、完整 diff、大段输出应写入独立 artifact/log 文件，并在 report 中引用路径。
 - interactive/autonomous-experiment worker 的 tmux pane 应展示“意图、短命令、短 tail/指标、判断、下一步”，不要用整屏训练日志或大表格刷屏。
-- 主进程巡检优先使用 `schedule`、`progress --lines 40`、`jobs`、`collect --lines 30`；只有诊断具体异常时才扩大 `capture --lines` 或读取完整 artifact。
+- 主进程巡检优先使用 `compact-memory --print --context-pack`、`compact-memory --print`、`list`、`jobs`、`progress --lines 20`；只有短记忆不足时才读 `schedule`、`collect --lines 20/30`、扩大 `capture --lines` 或读取完整 artifact。
+- 主进程做出重要判断后，应运行 `compact-memory --note ... --decision ... --next-action ...`，把聊天上下文里的关键状态压缩进文件。
 - 咨询 worker 默认也应简洁回答，必要时给出文件路径和命令，让用户自己追溯完整证据。
 
 推荐的信息流是：
@@ -176,7 +180,9 @@ raw logs / full tables / full diffs / tmux transcript
   -> artifact/log/capture 文件
   -> worker report 的压缩结论和路径
   -> progress 的 5-10 行状态
-  -> schedule/consult context 的全局摘要
+  -> COORDINATOR_CONTEXT_PACK.md 的最短重载包
+  -> COORDINATOR_MEMORY.md 的压缩工作记忆
+  -> schedule/consult context 的审计摘要
   -> 主进程最终判断
 ```
 
@@ -222,6 +228,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 初始化后会生成：
 
 ```text
+.codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md
+.codex/tmux-workers/COORDINATOR_MEMORY.md
 .codex/tmux-workers/COORDINATOR_SCHEDULE.md
 .codex/tmux-workers/COORDINATOR_RECOVERY.md
 ```
@@ -249,6 +257,25 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 ```
 
 这个文件是新主进程的接管 handoff，包含当前目标、worker 总览、关键文件、最近调度事件、peer messages 和恢复后第一批检查命令。
+
+手动压缩主进程记忆：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  compact-memory \
+  --note "当前分支 manager 已完成子 worker 分工。" \
+  --decision "暂不新增 worker，等待 gpu:0 任务产出指标。" \
+  --next-action "下一轮先看 compact-memory、jobs、progress --lines 20。"
+```
+
+查看最短上下文包：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  compact-memory --print --context-pack
+```
 
 注意：普通执行 worker 使用 `workspace-write` sandbox 时，manager 会额外给 Codex CLI 传入：
 

@@ -21,13 +21,14 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - For experiment branches, prefer visible `--worker-kind autonomous-experiment` workers so the user can attach to tmux and watch the Codex worker's actual planning, checks, commands, diagnostics, and handoff.
    - For major branches, prefer `--worker-kind branch-manager` first. The branch manager receives the branch target and resource envelope, then launches child `autonomous-experiment` workers with `--parent-worker` and coordinates their peer messages and branch report.
    - Treat coordinator context as scarce: worker updates should be summaries with evidence paths; raw logs, full diffs, long tables, and complete transcripts should remain in files unless explicitly needed.
+   - Keep `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` refreshed with `compact-memory`; use them as the coordinator's short working memory before loading larger artifacts.
    - When a busy interactive worker needs an immediate redirect, use `interrupt-send`: the manager submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
    - For long-lived tmux Codex operation, start `start-health-supervisor` to recover interactive panes stuck on known transient Codex network/subprocess errors. When the main Codex is registered inside tmux, use `--restart-main-on-context-full --restart-main-when-missing` so context-window exhaustion or a missing coordinator target launches a new coordinator through `recover-coordinator`.
 4. Monitor on a cadence.
    - Early launch: check frequently.
    - Stable run: check at a slower cadence.
    - Near decision point: tighten the cadence.
-   - Main-coordinator checks must be short and bounded. Use `supervise --once`, `jobs`, `progress --lines 40`, `collect --lines 30`, and short log tails.
+   - Main-coordinator checks must be short and bounded. Use `compact-memory --print --context-pack`, `supervise --once`, `jobs`, `progress --lines 20`, and short log tails. Use `collect --lines 20/30` or larger schedule/capture only when compact memory is insufficient.
    - Persistent monitor loops must run through `start-supervisor` or `start-health-supervisor` in tmux, not as foreground commands in the coordinator process.
 5. Fill idle time with exploration.
    - Draft next ideas.
@@ -57,8 +58,10 @@ This reference describes a reusable autonomous follow-up loop for long-running p
 - Use branch-manager workers when a branch would otherwise require the main coordinator to track many child runs directly. Give the branch manager explicit `--manager-scope`, owned output roots, and resource limits.
 - Let front-line workers communicate through `peer-send` for short evidence paths, blockers, and dependency notices. Scope/resource changes still require a branch-manager or main-coordinator scheduling decision.
 - Keep `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` and `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` current so worker state, scheduling decisions, and user-consultation answers remain auditable.
+- Keep `.codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md` and `.codex/tmux-workers/COORDINATOR_MEMORY.md` current so the main coordinator can compress working memory and avoid relying on long chat history.
 - Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` current so a new main coordinator can recover the mission, worker graph, resources, jobs, branch summaries, peer messages, and next checkpoints after the old coordinator dies or exhausts context.
-- Keep the schedule and consultation context compact. They should contain worker status, concise report/progress excerpts, and paths to evidence, not full tmux scrollback or raw experiment logs.
+- Keep compact memory, schedule, and consultation context compact. They should contain worker status, concise report/progress excerpts, decisions, next checkpoints, and paths to evidence, not full tmux scrollback or raw experiment logs.
+- After every meaningful decision or phase checkpoint, run `compact-memory --note ... --decision ... --next-action ...`; this preserves the decision outside the model context window.
 - Do not keep the coordinator alive with bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded Python loops. Put those jobs in tmux or background processes with registered PID/log/resource ownership.
 
 ## Monitoring Cadence
