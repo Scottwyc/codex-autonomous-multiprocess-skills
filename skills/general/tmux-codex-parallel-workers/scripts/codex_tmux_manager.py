@@ -111,6 +111,14 @@ def coordinator_memory_events_path(base: Path) -> Path:
     return base / "coordinator_memory_events.jsonl"
 
 
+def coordinator_constraints_path(base: Path) -> Path:
+    return base / "COORDINATOR_CONSTRAINTS.md"
+
+
+def coordinator_constraints_events_path(base: Path) -> Path:
+    return base / "coordinator_constraints_events.jsonl"
+
+
 def coordinator_status_path(base: Path) -> Path:
     return base / "status" / "coordinator.json"
 
@@ -283,6 +291,68 @@ def load_memory_events(base: Path, limit: int = 40) -> list[dict[str, Any]]:
     return records
 
 
+def default_constraints_text() -> str:
+    return f"""# Coordinator Unified Constraints
+
+Updated: {now_iso()}
+
+These constraints are set by the main coordinator and apply to every tmux-launched Codex process unless the coordinator explicitly records an override with `constraints` and `schedule-note`.
+
+## Priority
+
+1. Obey task-specific safety and write-scope limits.
+2. Obey these coordinator-wide constraints.
+3. Then follow the worker-specific task plan.
+
+If a task conflicts with this file, stop and ask the coordinator for a recorded override instead of improvising.
+
+## Default Operational Constraints
+
+- Read this file before starting or resuming work, before launching child workers, and before starting background jobs.
+- Keep coordinator-facing updates concise; write long logs, tables, diffs, TensorBoard output, and transcripts to files and cite paths.
+- Use explicit `--resource` ownership for GPUs, ports, output directories, checkpoints, TensorBoard instances, and long-running jobs.
+- Do not start duplicate training/evaluation/TensorBoard jobs for the same owned output without checking `jobs`, progress, and schedule first.
+- Do not bind dashboards or services to `0.0.0.0` unless the coordinator explicitly authorizes it. Prefer `127.0.0.1`.
+- TensorBoard and similar dashboards must use coordinator-assigned safe ports. Prefer the project-local range `16006-16099` when no project-specific range is recorded, and register the port as `--resource port:<PORT>` or in the job/progress record.
+- If a desired port is already in use, do not kill the owner blindly. Pick another allowed port or ask the coordinator to resolve ownership.
+- Destructive cleanup such as `rm -rf`, deleting checkpoints, killing unrelated processes, or overwriting shared results requires an explicit coordinator decision.
+- Remote jobs must record host, tmux/session or PID marker, GPU, command, log path, output roots, and liveness check in progress/report because local PID tracking may not cover remote processes.
+"""
+
+
+def ensure_constraints_doc(base: Path) -> Path:
+    path = coordinator_constraints_path(base)
+    if not path.exists():
+        write_text(path, default_constraints_text())
+        append_text(
+            coordinator_constraints_events_path(base),
+            json.dumps({"timestamp": now_iso(), "event": "init-default-constraints", "detail": str(path)}, ensure_ascii=False, sort_keys=True) + "\n",
+        )
+    return path
+
+
+def append_constraints_event(base: Path, event: str, detail: str, data: dict[str, Any] | None = None) -> None:
+    append_text(
+        coordinator_constraints_events_path(base),
+        json.dumps(
+            {
+                "timestamp": now_iso(),
+                "event": event,
+                "detail": detail,
+                "data": data or {},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def constraints_excerpt(base: Path, lines: int = 40) -> str:
+    path = ensure_constraints_doc(base)
+    return tail_text(path, lines)
+
+
 def worker_latest_summary(worker: dict[str, Any], *, progress_lines: int = 5, report_lines: int = 5, limit: int = 220) -> str:
     progress = one_line(tail_text(Path(worker.get("progress_file", "")), progress_lines), limit)
     report = one_line(tail_text(Path(worker.get("report_file", "")), report_lines), limit)
@@ -347,6 +417,7 @@ def render_coordinator_memory(
         f"Reason: {reason}",
         f"State dir: `{base}`",
         f"Mission: {mission}",
+        f"Unified constraints: `{coordinator_constraints_path(base)}`",
         "",
         "This file is the coordinator's short working memory. Prefer reading it before larger schedule, collect, capture, log, or report files.",
         "",
@@ -422,6 +493,8 @@ def render_coordinator_memory(
     lines.extend(["", "## Resource And Ownership Snapshot", ""])
     lines.append(markdown_table(["Worker", "资源", "Owned paths"], resource_rows) if resource_rows else "暂无资源声明。")
 
+    lines.extend(["", "## Unified Constraints Excerpt", "", "```text", constraints_excerpt(base, 28), "```"])
+
     lines.extend(["", "## Evidence Pointers", ""])
     lines.append(markdown_table(["Worker", "Progress", "Report", "Jobs"], path_rows) if path_rows else "暂无 worker evidence。")
 
@@ -471,6 +544,7 @@ def render_coordinator_context_pack(base: Path, registry: dict[str, Any], *, rea
         f"Mission: {mission}",
         f"State dir: `{base}`",
         f"Coordinator target: `{coordinator.get('target', '-') if coordinator else '-'}`",
+        f"Unified constraints: `{coordinator_constraints_path(base)}`",
         "",
         "Use this as the short reload packet when the coordinator context is getting large. Read larger files only by path when needed.",
         "",
@@ -498,8 +572,9 @@ def render_coordinator_context_pack(base: Path, registry: dict[str, Any], *, rea
             "",
             f"1. `{coordinator_context_pack_path(base)}`",
             f"2. `{coordinator_memory_path(base)}`",
-            f"3. `{schedule_doc_path(base)}` only for audit detail",
-            "4. Worker progress/report/jobs/captures only for concrete diagnosis or final review",
+            f"3. `{coordinator_constraints_path(base)}` before launching or redirecting workers",
+            f"4. `{schedule_doc_path(base)}` only for audit detail",
+            "5. Worker progress/report/jobs/captures only for concrete diagnosis or final review",
             "",
             "## Commands",
             "",
@@ -623,6 +698,7 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
             "",
             f"- Context pack: `{coordinator_context_pack_path(base)}`",
             f"- Compact memory: `{coordinator_memory_path(base)}`",
+            f"- Unified constraints: `{coordinator_constraints_path(base)}`",
             f"- Recovery handoff: `{coordinator_handoff_path(base)}`",
             "",
         ]
@@ -910,9 +986,12 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             "",
             f"- 短上下文包：`{coordinator_context_pack_path(base)}`",
             f"- 主进程压缩记忆：`{coordinator_memory_path(base)}`",
+            f"- 统一运行约束：`{coordinator_constraints_path(base)}`",
+            f"- 约束事件：`{coordinator_constraints_events_path(base)}`",
             f"- 压缩记忆事件：`{coordinator_memory_events_path(base)}`",
             f"- 刷新并查看短包：`python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack`",
             f"- 写入关键决策：`python {MANAGER_PATH} --state-dir {base} compact-memory --note '<short state>' --decision '<decision>' --next-action '<next checkpoint>'`",
+            f"- 查看/更新统一约束：`python {MANAGER_PATH} --state-dir {base} constraints --print`",
             "- 主进程应优先读取短上下文包和压缩记忆；只有审查、诊断或最终收口时才读取完整 schedule、collect、capture、log 或 report。",
             "",
             "## 用户咨询窗口",
@@ -950,6 +1029,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             f"- 查看咨询上下文：`python {MANAGER_PATH} --state-dir {base} consult-context --print`",
             f"- 查看短上下文包：`python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack`",
             f"- 查看压缩记忆：`python {MANAGER_PATH} --state-dir {base} compact-memory --print`",
+            f"- 查看统一约束：`python {MANAGER_PATH} --state-dir {base} constraints --print`",
             f"- 查看主进程接管 handoff：`{coordinator_handoff_path(base)}`",
             f"- 汇总收口：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
             f"- 连接 tmux：`tmux attach -t {session}`",
@@ -1121,6 +1201,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         f"主进程接管 handoff：`{coordinator_handoff_path(base)}`",
         f"主进程短上下文包：`{coordinator_context_pack_path(base)}`",
         f"主进程压缩记忆：`{coordinator_memory_path(base)}`",
+        f"统一运行约束：`{coordinator_constraints_path(base)}`",
         f"注册主进程 target：`{coordinator.get('target', '-') if coordinator else '-'}`",
         "",
         "## 咨询 worker 规则",
@@ -1137,6 +1218,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         f"- 咨询上下文：`python {MANAGER_PATH} --state-dir {base} consult-context --print`",
         f"- 调度总览：`python {MANAGER_PATH} --state-dir {base} schedule --print`",
         f"- 短上下文包：`python {MANAGER_PATH} --state-dir {base} compact-memory --print --context-pack`",
+        f"- 统一运行约束：`python {MANAGER_PATH} --state-dir {base} constraints --print`",
         f"- worker 列表：`python {MANAGER_PATH} --state-dir {base} list`",
         f"- jobs：`python {MANAGER_PATH} --state-dir {base} jobs`",
         f"- collect：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
@@ -1194,6 +1276,7 @@ def refresh_consult_context(base: Path, registry: dict[str, Any] | None = None) 
 
 def refresh_schedule_doc(base: Path, registry: dict[str, Any] | None = None) -> Path:
     registry = registry or load_registry(base)
+    ensure_constraints_doc(base)
     path = schedule_doc_path(base)
     write_text(path, render_schedule_doc(base, registry))
     refresh_compact_memory(base, registry)
@@ -1333,6 +1416,7 @@ def create_worker_docs(
     inbox = base / "inbox" / name
     status = base / "status" / f"{name}.json"
     jobs = base / "jobs" / f"{name}.json"
+    constraints = ensure_constraints_doc(base)
 
     scope = "\n".join(f"- {item}" for item in write_scope) if write_scope else "- Read-only unless explicitly required by the task."
     owned = "\n".join(f"- {item}" for item in owned_paths) if owned_paths else "- None declared."
@@ -1388,6 +1472,12 @@ Reasoning effort: {reasoning_effort or "Codex CLI default"}
 ## Manager Scope
 
 {manager_scope_text}
+
+## Unified Coordinator Constraints
+
+Read and obey this file before starting work, launching child workers, opening TensorBoard, binding ports, starting background jobs, or changing resources:
+
+{constraints}
 
 ## Git Isolation
 
@@ -1670,6 +1760,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     base = state_dir(args.state_dir)
     cwd = Path(args.cwd).expanduser().resolve()
     ensure_session(args.session, cwd)
+    constraints_file = ensure_constraints_doc(base)
     registry = load_registry(base)
     registry["session"] = args.session
     registry["state_dir"] = str(base)
@@ -1685,12 +1776,14 @@ def cmd_init(args: argparse.Namespace) -> None:
     schedule_path = refresh_schedule_doc(base, registry)
     print(f"session={args.session}")
     print(f"state_dir={base}")
+    print(f"constraints={constraints_file}")
     print(f"schedule={schedule_path}")
 
 
 def cmd_register_coordinator(args: argparse.Namespace) -> None:
     require_binary("tmux")
     base = state_dir(args.state_dir)
+    constraints_file = ensure_constraints_doc(base)
     cwd = Path(args.cwd).expanduser().resolve()
     target = args.target
     if not target or target == "auto":
@@ -1739,6 +1832,7 @@ def cmd_register_coordinator(args: argparse.Namespace) -> None:
     handoff = write_coordinator_handoff(base, registry, "register-coordinator")
     schedule_path = refresh_schedule_doc(base, registry)
     print(f"coordinator={target}")
+    print(f"constraints={constraints_file}")
     print(f"handoff={handoff}")
     print(f"schedule={schedule_path}")
 
@@ -1749,6 +1843,7 @@ def cmd_recover_coordinator(args: argparse.Namespace) -> None:
         require_binary("codex")
     base = state_dir(args.state_dir)
     registry = load_registry(base)
+    constraints_file = ensure_constraints_doc(base)
     coordinator = registry.get("coordinator") or {}
     if not coordinator and not args.cwd:
         raise SystemExit("No registered coordinator found. Run register-coordinator first or pass --cwd for manual recovery.")
@@ -1787,23 +1882,25 @@ Immediate recovery protocol:
 
 1. Read the shortest context pack first: {coordinator_context_pack_path(base)}
 2. Read the compact coordinator memory: {coordinator_memory_path(base)}
-3. Read the handoff file: {handoff}
-4. Read the schedule only when the compact memory is insufficient: {schedule_doc_path(base)}
-5. Inspect existing workers with:
+3. Read the unified coordinator constraints: {constraints_file}
+4. Read the handoff file: {handoff}
+5. Read the schedule only when the compact memory is insufficient: {schedule_doc_path(base)}
+6. Inspect existing workers with:
    python {MANAGER_PATH} --state-dir {base} list
    python {MANAGER_PATH} --state-dir {base} jobs
    python {MANAGER_PATH} --state-dir {base} progress --lines 20
    python {MANAGER_PATH} --state-dir {base} collect --lines 20
-6. Reconstruct the mission, active workers, branch-manager hierarchy, resource ownership, open blockers, and next checkpoints from durable files.
-7. Do not restart existing workers from scratch. Resume, redirect, stop, or collect them only after checking their progress/report/jobs.
-8. Record the recovery with schedule-note and compact-memory, refresh consult context, and continue coordinating until the objective is complete or the user explicitly stops autonomous follow-up.
-9. Keep coordinator context lean: consume context pack and compact memory first, and only load long logs or full captures when needed for diagnosis or final review.
+7. Reconstruct the mission, active workers, branch-manager hierarchy, resource ownership, open blockers, and next checkpoints from durable files.
+8. Do not restart existing workers from scratch. Resume, redirect, stop, or collect them only after checking their progress/report/jobs.
+9. Record the recovery with schedule-note and compact-memory, refresh consult context, and continue coordinating until the objective is complete or the user explicitly stops autonomous follow-up.
+10. Keep coordinator context lean: consume context pack and compact memory first, and only load long logs or full captures when needed for diagnosis or final review.
 
 Key files:
 
 - State dir: {base}
 - Context pack: {coordinator_context_pack_path(base)}
 - Compact memory: {coordinator_memory_path(base)}
+- Unified constraints: {constraints_file}
 - Handoff: {handoff}
 - Schedule: {schedule_doc_path(base)}
 - Consultation context: {consult_context_path(base)}
@@ -1850,6 +1947,7 @@ Key files:
         "Please read and execute this coordinator recovery prompt file: "
         f"{prompt_file}\n"
         f"Start with the short context pack: {coordinator_context_pack_path(base)}\n"
+        f"Then read the unified coordinator constraints: {constraints_file}\n"
         f"Then read the recovery handoff file: {handoff}\n"
         "Continue the existing autonomous multiprocess run; do not restart workers from scratch.",
     )
@@ -1903,6 +2001,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
     require_binary("codex")
     base = state_dir(args.state_dir)
     requested_cwd = Path(args.cwd).expanduser().resolve()
+    constraints_file = ensure_constraints_doc(base)
 
     name = safe_name(args.name)
     window = safe_name(args.window or f"cw-{name}")
@@ -2013,6 +2112,8 @@ def cmd_launch(args: argparse.Namespace) -> None:
         [
             f"You are a {worker_kind} Codex worker launched by a coordinator in tmux.",
             "Do not revert edits made by the coordinator or other workers. Stay inside the assigned task and report changed files, commands run, results, blockers, and next recommended action before exiting.",
+            f"Unified coordinator constraints: read and obey this file before doing anything else: {constraints_file}",
+            "These constraints are higher priority than the worker-specific task unless the coordinator records an explicit override. Pay special attention to resource ownership, TensorBoard/dashboard safe ports, bind hosts, output paths, destructive cleanup, and background job registration.",
             "Update the progress file at key milestones and before completion. If you produce a longer result, write it into the report file.",
             "Coordinator context budget: keep progress/report updates and tmux replies concise. Do not paste raw logs, full diffs, long tables, or complete transcripts into coordinator-facing updates; write them to artifact/log files and cite paths with a short summary.",
             "Worker-to-worker communication is allowed only through manager-mediated `peer-send` messages. Use it for short factual evidence, blockers, or dependency notices; do not treat peer messages as permission to change assigned scope or resources.",
@@ -2024,6 +2125,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
             f"Report file: {docs['report']}",
             f"Inbox directory: {docs['inbox']}",
             f"Background jobs file: {docs['jobs']}",
+            f"Unified constraints file: {constraints_file}",
             "\n".join(scope_lines),
             f"Task:\n{task}",
         ]
@@ -2051,7 +2153,9 @@ def cmd_launch(args: argparse.Namespace) -> None:
         time.sleep(args.startup_wait)
         send_prompt(
             target,
-            "Please read and execute this worker prompt file: "
+            "Please first read the unified coordinator constraints, then read and execute this worker prompt file.\n"
+            f"Constraints: {constraints_file}\n"
+            "Worker prompt: "
             f"{prompt_file}\n"
             "Keep progress/report concise, cite artifact paths for long evidence, and check the inbox directory for coordinator messages.",
         )
@@ -2689,6 +2793,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     require_binary("tmux")
     require_binary("codex")
     base = state_dir(args.state_dir)
+    constraints_file = ensure_constraints_doc(base)
     registry, worker = resolve_worker(base, args.name)
     old_target = f"{worker['session']}:{worker['window']}"
     if window_exists(worker["session"], worker["window"]) and not args.force:
@@ -2703,12 +2808,14 @@ def cmd_resume(args: argparse.Namespace) -> None:
     resume_prompt = "\n\n".join(
         [
             "You are resuming a tmux-managed Codex worker after interruption or coordinator restart.",
+            f"Before resuming work, read and obey the unified coordinator constraints: {constraints_file}",
             f"Worker kind: {worker.get('worker_kind', 'standard')}",
             f"Worker plan: {worker.get('workplan_file')}",
             f"Progress file: {worker.get('progress_file')}",
             f"Report file: {worker.get('report_file')}",
             f"Inbox directory: {worker.get('inbox_dir')}",
             f"Background jobs file: {worker.get('jobs_file')}",
+            f"Unified constraints file: {constraints_file}",
             "The worker state directory is mounted writable for progress/report/job registration. Do not edit workers.json, status files, schedule files, or registry files manually.",
             "Coordinator context budget: keep progress/report updates concise, write long evidence to artifact/log files, and cite paths with short summaries.",
             "If this is an autonomous-experiment worker, keep the tmux Codex pane useful as a visible operation trace: briefly state major intent before important actions, register long-running jobs, and update progress/report at checkpoints.",
@@ -2739,7 +2846,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     if mode == "interactive":
         tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(worker['log_file']))}")
         time.sleep(args.startup_wait)
-        send_prompt(target, f"Please read and execute this resume prompt file: {prompt_file}")
+        send_prompt(target, f"Please first read unified coordinator constraints: {constraints_file}\nThen read and execute this resume prompt file: {prompt_file}")
     worker["session"] = session
     worker["window"] = window
     worker["mode"] = mode
@@ -2854,6 +2961,52 @@ def cmd_compact_memory(args: argparse.Namespace) -> None:
         print(f"context_pack={context_pack_path}")
 
 
+def cmd_constraints(args: argparse.Namespace) -> None:
+    base = state_dir(args.state_dir)
+    path = ensure_constraints_doc(base)
+    changed = False
+    if args.reset_defaults:
+        write_text(path, default_constraints_text())
+        append_constraints_event(base, "reset-defaults", f"Reset constraints to defaults at {path}")
+        append_schedule_event(base, "constraints", detail="Reset unified coordinator constraints to defaults.")
+        changed = True
+    if args.set_file:
+        source = Path(args.set_file).expanduser().resolve()
+        write_text(path, source.read_text(encoding="utf-8"))
+        append_constraints_event(base, "set-file", f"Replaced constraints from {source}", {"source": str(source)})
+        append_schedule_event(base, "constraints", detail=f"Replaced unified coordinator constraints from {source}.")
+        changed = True
+    updates: list[str] = []
+    for item in args.append or []:
+        if item.strip():
+            updates.append(item.strip())
+    if args.tensorboard_port_range:
+        updates.append(
+            "TensorBoard/dashboard constraint: use only coordinator-assigned safe ports in "
+            f"`{args.tensorboard_port_range}`; bind to `127.0.0.1` by default; register the chosen port as "
+            "`--resource port:<PORT>` or in the worker job/progress record; do not kill an existing port owner without a coordinator decision."
+        )
+    if updates:
+        section = ["", f"## Coordinator Constraint Update - {now_iso()}", ""]
+        section.extend(f"- {item}" for item in updates)
+        section.append("")
+        append_text(path, "\n".join(section))
+        append_constraints_event(base, "append", " | ".join(one_line(item, 160) for item in updates), {"updates": updates})
+        append_schedule_event(base, "constraints", detail="Updated unified coordinator constraints: " + " | ".join(one_line(item, 160) for item in updates))
+        changed = True
+    registry = load_registry(base)
+    if changed:
+        refresh_schedule_doc(base, registry)
+    else:
+        refresh_compact_memory(base, registry, reason="constraints-read")
+        refresh_consult_context(base, registry)
+        write_coordinator_handoff(base, registry, reason="constraints-read")
+    if args.print or not changed:
+        print(path.read_text(encoding="utf-8", errors="replace"))
+    else:
+        print(path)
+
+
 def cmd_schedule(args: argparse.Namespace) -> None:
     base = state_dir(args.state_dir)
     registry = load_registry(base)
@@ -2902,6 +3055,7 @@ def cmd_schedule_note(args: argparse.Namespace) -> None:
 
 def write_consult_prompt(base: Path, registry: dict[str, Any]) -> Path:
     path = consult_prompt_path(base)
+    constraints_file = ensure_constraints_doc(base)
     prompt = f"""# Codex Tmux User Consultation Worker
 
 You are the dedicated read-only user consultation Codex worker for a tmux-managed autonomous run.
@@ -2909,7 +3063,7 @@ You are the dedicated read-only user consultation Codex worker for a tmux-manage
 Your job:
 
 - Answer user questions about the current coordinator mission, worker layout, scheduling decisions, logs, results, resources, blockers, and evidence paths.
-- Keep answers grounded in the local state files. Before each answer, re-read the consultation context and the coordinator schedule.
+- Keep answers grounded in the local state files. Before each answer, re-read the consultation context, coordinator schedule, and unified coordinator constraints.
 - Default to Chinese unless the user asks otherwise.
 - Give concrete paths and commands when helpful.
 - Keep answers compact by default. Summarize long reports/logs and cite paths or manager commands instead of pasting long excerpts.
@@ -2925,6 +3079,7 @@ Hard limits:
 Primary files to read:
 
 - Consultation context: {consult_context_path(base)}
+- Unified coordinator constraints: {constraints_file}
 - Coordinator schedule: {schedule_doc_path(base)}
 - Worker registry: {registry_path(base)}
 - Schedule events: {schedule_events_path(base)}
@@ -2933,6 +3088,7 @@ Useful read-only commands:
 
 ```bash
 python {MANAGER_PATH} --state-dir {base} consult-context --print
+python {MANAGER_PATH} --state-dir {base} constraints --print
 python {MANAGER_PATH} --state-dir {base} schedule --print
 python {MANAGER_PATH} --state-dir {base} list
 python {MANAGER_PATH} --state-dir {base} jobs
@@ -3035,7 +3191,7 @@ def cmd_start_consult(args: argparse.Namespace) -> None:
         "Please read this consultation startup prompt first: "
         f"{prompt_file}\n"
         f"Then read the current consultation context: {consult_context_path(base)}\n"
-        f"Before every user-facing answer, re-read {consult_context_path(base)} and {schedule_doc_path(base)}. "
+        f"Before every user-facing answer, re-read {consult_context_path(base)}, {coordinator_constraints_path(base)}, and {schedule_doc_path(base)}. "
         "Stay read-only, answer compactly by default, and wait for user questions.",
     )
     print(f"consult worker started at {target}")
@@ -3061,6 +3217,7 @@ def cmd_consult_sync(args: argparse.Namespace) -> None:
             f"{session}:{window}",
             f"Coordinator consultation context was refreshed at {now_iso()}.\n"
             f"Please re-read: {context_path}\n"
+            f"Also re-read unified coordinator constraints: {coordinator_constraints_path(base)}\n"
             f"Also re-read: {schedule_path}\n"
             f"Coordinator note: {detail}\n"
             "Do not execute any mutations; continue answering user questions from the refreshed context.",
@@ -3353,6 +3510,14 @@ def build_parser() -> argparse.ArgumentParser:
     compact_memory.add_argument("--print", action="store_true", help="Print the refreshed memory file.")
     compact_memory.add_argument("--context-pack", action="store_true", help="With --print, print the shorter context pack instead of full compact memory.")
     compact_memory.set_defaults(func=cmd_compact_memory)
+
+    constraints = sub.add_parser("constraints", help="View or update unified coordinator constraints loaded by all launched Codex processes.")
+    constraints.add_argument("--print", action="store_true", help="Print the constraints file after any update.")
+    constraints.add_argument("--append", action="append", help="Append one coordinator-wide constraint bullet. Repeatable.")
+    constraints.add_argument("--set-file", help="Replace constraints with the contents of this Markdown file.")
+    constraints.add_argument("--reset-defaults", action="store_true", help="Reset constraints to the built-in defaults.")
+    constraints.add_argument("--tensorboard-port-range", help="Append/update a TensorBoard/dashboard safe port range constraint, for example 16006-16099.")
+    constraints.set_defaults(func=cmd_constraints)
 
     schedule = sub.add_parser("schedule", help="Refresh and show the coordinator scheduling document path.")
     schedule.add_argument("--print", action="store_true", help="Print the scheduling document content.")

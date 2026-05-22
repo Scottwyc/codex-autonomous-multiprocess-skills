@@ -1,6 +1,6 @@
 ---
 name: long-running-autonomous-project-management
-description: 'Use when a project needs long-running autonomous follow-up: keep the current session alive, launch and monitor experiments or jobs over time, balance GPU/CPU resources, compact coordinator memory to protect context budget, update project docs continuously, default to tmux-launched Codex worker parallelism for non-blocking branch tasks, use branch-manager worker hierarchies for major experimental branches unless disabled or unsuitable, and derive project-specific skills from this template when a specialized workflow is needed.'
+description: 'Use when a project needs long-running autonomous follow-up: keep the current session alive, launch and monitor experiments or jobs over time, balance GPU/CPU resources, maintain unified coordinator constraints for child processes, compact coordinator memory to protect context budget, update project docs continuously, default to tmux-launched Codex worker parallelism for non-blocking branch tasks, use branch-manager worker hierarchies for major experimental branches unless disabled or unsuitable, and derive project-specific skills from this template when a specialized workflow is needed.'
 ---
 
 # Long-Running Autonomous Project Management
@@ -111,58 +111,62 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
 
 1. Load `tmux-codex-parallel-workers`.
 2. Initialize a project-local worker state directory, normally `.codex/tmux-workers/`.
-3. If the main coordinator itself is running inside tmux, register it with `register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"` before long autonomous follow-up. This gives future sessions a durable `COORDINATOR_RECOVERY.md` handoff and lets the health supervisor restart the coordinator after context-window exhaustion.
-4. Start the dedicated read-only user consultation worker with `start-consult` when the run is expected to be long-lived or user auditability matters.
-5. Launch workers for independent branches that do not block the coordinator's next action. For real experiment branches, prefer `tmux-codex-parallel-workers launch --worker-kind autonomous-experiment` so the worker's Codex operation process remains visible in tmux.
+3. Write or refresh `.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md` before launching workers. This file is the unified constraint contract that every worker must load before its task prompt.
+   - Use `constraints --append ...` for project-wide rules such as output roots, GPU ownership, cleanup limits, SSH/remote-job rules, or immutable datasets/checkpoints.
+   - Use `constraints --tensorboard-port-range 16006-16099` or a project-specific range before starting TensorBoard/dashboard workers.
+   - TensorBoard and dashboards should bind to `127.0.0.1` by default, use coordinator-approved ports, and register ports as resources or job/progress entries.
+4. If the main coordinator itself is running inside tmux, register it with `register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"` before long autonomous follow-up. This gives future sessions a durable `COORDINATOR_RECOVERY.md` handoff and lets the health supervisor restart the coordinator after context-window exhaustion.
+5. Start the dedicated read-only user consultation worker with `start-consult` when the run is expected to be long-lived or user auditability matters.
+6. Launch workers for independent branches that do not block the coordinator's next action. For real experiment branches, prefer `tmux-codex-parallel-workers launch --worker-kind autonomous-experiment` so the worker's Codex operation process remains visible in tmux.
    - In this environment, launch/resume project-local experiment workers with YOLO-level permissions (`sandbox=danger-full-access`, `approval=never`) unless the user explicitly asks for a restricted worker. This avoids the read-only `.codex` mount and blocked SSH failure mode seen under `workspace-write`.
    - Even under YOLO permissions, worker prompts must avoid destructive filesystem operations such as `rm` unless the coordinator explicitly authorizes a narrowly scoped cleanup.
    - Prefer keeping visible worker panes on the local/nature host. Workers should operate other machines through SSH from the local pane, so the user can monitor, interrupt, and clean all worker windows in one local tmux session.
-6. For major branches, launch a subordinate branch manager before launching many front-line workers directly.
+7. For major branches, launch a subordinate branch manager before launching many front-line workers directly.
    - Use `tmux-codex-parallel-workers launch <branch> --worker-kind branch-manager`.
    - Give it a concrete branch mission, `--manager-scope`, resources, owned output roots, and the expected branch-level report.
    - The branch manager may launch child workers with `--parent-worker <branch-manager>`, usually `--worker-kind autonomous-experiment`.
    - The branch manager may use `peer-send` to allow front-line workers to exchange short evidence, blockers, and artifact paths.
    - The main coordinator should inspect the branch manager's progress/report and schedule notes first, then drill into child workers only when there is a failure, integration decision, or user audit request.
-7. Assign every worker:
+8. Assign every worker:
    - objective
    - working directory
    - read/write scope
    - GPU/CPU/port/output ownership when relevant
    - expected completion report
-8. Maintain `.codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md` and `.codex/tmux-workers/COORDINATOR_MEMORY.md` as the coordinator's short working memory. The coordinator should refresh and read these before routine checkpoints instead of reloading schedule/collect/capture output into chat context.
-9. Maintain `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` as the user-auditable control document for starts, stops, task assignment, branch-manager hierarchy, peer messages, scheduling decisions, and results.
-10. Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` fresh as the restart handoff for a new main coordinator. It must be sufficient for a new thread to find previous workers, branch managers, jobs, reports, resources, blockers, and next checkpoints.
-11. Keep `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` fresh so the consultation worker can answer user questions without interrupting the coordinator.
-12. Keep the coordinator on the critical path while workers run, and keep the coordinator context lean:
+9. Maintain `.codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md` and `.codex/tmux-workers/COORDINATOR_MEMORY.md` as the coordinator's short working memory. The coordinator should refresh and read these before routine checkpoints instead of reloading schedule/collect/capture output into chat context.
+10. Maintain `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` as the user-auditable control document for starts, stops, task assignment, branch-manager hierarchy, peer messages, scheduling decisions, and results.
+11. Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` fresh as the restart handoff for a new main coordinator. It must be sufficient for a new thread to find previous workers, branch managers, jobs, reports, resources, blockers, constraints, and next checkpoints.
+12. Keep `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` fresh so the consultation worker can answer user questions without interrupting the coordinator.
+13. Keep the coordinator on the critical path while workers run, and keep the coordinator context lean:
    - prefer `compact-memory --print --context-pack`, `compact-memory --print`, `list`, `jobs`, and `progress --lines 20`;
    - use `schedule`, `collect --lines 20/30`, and `capture --lines 80/120` only when compact memory is insufficient;
    - after meaningful decisions, run `compact-memory --note ... --decision ... --next-action ...` so the next checkpoint can rely on file memory instead of chat history;
    - ask workers to write long evidence to report/artifact/log files and provide paths plus short summaries;
    - keep consultation-window answers compact and evidence-linked.
-13. At each monitoring checkpoint, inspect compact memory, branch-manager summaries, and worker summaries first, inspect changed files or longer captures only when needed, integrate safe results, refresh the consultation context, and record the decision in the follow-up file and compact memory.
-14. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux windows accumulate.
-15. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
-16. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
-17. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. If the main Codex itself is registered inside tmux, use `--restart-main-on-context-full --restart-main-when-missing` so the health supervisor launches `recover-coordinator` when the old coordinator exhausts its context window or the registered target disappears.
-18. Use the coordinator as the control plane:
+14. At each monitoring checkpoint, inspect compact memory, branch-manager summaries, and worker summaries first, inspect changed files or longer captures only when needed, integrate safe results, refresh the consultation context, and record the decision in the follow-up file and compact memory.
+15. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux windows accumulate.
+16. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
+17. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
+18. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. If the main Codex itself is registered inside tmux, use `--restart-main-on-context-full --restart-main-when-missing` so the health supervisor launches `recover-coordinator` when the old coordinator exhausts its context window or the registered target disappears.
+19. Use the coordinator as the control plane:
    - decide which branch is worth running;
    - cap GPU/CPU/IO usage;
    - choose whether to launch direct front-line workers or a branch-manager hierarchy;
    - issue timely `send` / `interrupt-send` instructions when a worker needs a protocol correction or a new checkpoint;
    - collect reports and reconcile results;
    - update durable docs and promotion decisions.
-19. Use branch managers as branch control planes:
+20. Use branch managers as branch control planes:
    - decompose one major branch into child workers;
    - coordinate front-line worker peer messages and resource use inside the assigned scope;
    - maintain branch-level progress/report summaries;
    - escalate final decisions and cross-branch conflicts to the main coordinator.
-20. Use front-line workers as execution planes:
+21. Use front-line workers as execution planes:
    - launch/monitor assigned experiments;
    - run bounded audits or sweeps inside their write scope;
    - keep progress/report files current;
    - use `peer-send` only for short factual messages and evidence paths;
    - register background jobs when supported.
-21. Current job registration caveat: `job-add` tracks local PIDs directly. For remote tmux jobs on another host, workers must additionally record the host, tmux session, GPU, command, log path, result/checkpoint roots, and liveness/polling command in progress/report/schedule. Treat `pid=0` job entries only as remote markers unless the project-specific manager has first-class remote liveness checks.
+22. Current job registration caveat: `job-add` tracks local PIDs directly. For remote tmux jobs on another host, workers must additionally record the host, tmux session, GPU, command, log path, result/checkpoint roots, and liveness/polling command in progress/report/schedule. Treat `pid=0` job entries only as remote markers unless the project-specific manager has first-class remote liveness checks.
 
 ### 5. Failure Handling
 

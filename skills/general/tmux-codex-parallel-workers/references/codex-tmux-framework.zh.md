@@ -29,10 +29,12 @@
   |     |
   |     |-- .codex/tmux-workers/
   |           |-- workers.json             -> worker registry
+  |           |-- COORDINATOR_CONSTRAINTS.md -> 所有子进程优先加载的统一约束
   |           |-- COORDINATOR_CONTEXT_PACK.md -> 主进程最短上下文包
   |           |-- COORDINATOR_MEMORY.md    -> 主进程压缩工作记忆
   |           |-- COORDINATOR_SCHEDULE.md  -> 主进程调度总览文档
   |           |-- COORDINATOR_RECOVERY.md  -> 主进程重启接管 handoff
+  |           |-- coordinator_constraints_events.jsonl -> 统一约束事件
   |           |-- coordinator_memory_events.jsonl -> 压缩记忆事件
   |           |-- schedule_events.jsonl     -> 调度事件日志
   |           |-- peer_messages.jsonl       -> worker 横向消息日志
@@ -173,6 +175,49 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - 主进程做出重要判断后，应运行 `compact-memory --note ... --decision ... --next-action ...`，把聊天上下文里的关键状态压缩进文件。
 - 咨询 worker 默认也应简洁回答，必要时给出文件路径和命令，让用户自己追溯完整证据。
 
+## 2.3.1 统一运行约束
+
+主进程应维护：
+
+```text
+.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md
+```
+
+这是所有 tmux Codex 子进程必须优先加载的统一约束文件，优先级高于单个 worker 的任务 prompt。它用于记录跨 worker 的资源、安全和运行规则，例如：
+
+- TensorBoard/dashboard 安全端口范围；
+- dashboard 默认只绑定 `127.0.0.1`；
+- GPU、端口、输出目录、checkpoint、数据集的所有权；
+- remote job 的 host/session/log/liveness 记录要求；
+- 禁止无授权 `rm -rf`、删除 checkpoint、杀无关进程；
+- 共享数据、缓存和结果目录的不可覆盖规则。
+
+查看或初始化默认约束：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  constraints --print
+```
+
+设置 TensorBoard 安全端口范围：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  constraints --tensorboard-port-range 16006-16099
+```
+
+追加项目级约束：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  constraints --append "所有 TensorBoard 必须绑定 127.0.0.1，并用 --resource port:<PORT> 记录端口所有权。"
+```
+
+manager 会把这个约束文件写进 worker plan、worker prompt、resume prompt、branch-manager prompt、consult prompt 和 recovered coordinator prompt。worker 启动时会先收到“先读统一约束，再读任务 prompt”的指令。
+
 推荐的信息流是：
 
 ```text
@@ -228,6 +273,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 初始化后会生成：
 
 ```text
+.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md
 .codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md
 .codex/tmux-workers/COORDINATOR_MEMORY.md
 .codex/tmux-workers/COORDINATOR_SCHEDULE.md

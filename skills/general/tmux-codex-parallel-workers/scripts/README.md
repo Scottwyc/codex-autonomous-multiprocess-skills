@@ -14,6 +14,7 @@ Responsibilities:
 - support subordinate `branch-manager` workers for major branches
 - write manager-mediated `peer-send` messages between workers
 - write worker prompts, progress files, reports, status files, logs, inbox messages, and job registries
+- maintain `COORDINATOR_CONSTRAINTS.md` as the unified constraints file all launched Codex processes read first
 - maintain `COORDINATOR_SCHEDULE.md`
 - maintain `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as compact coordinator memory
 - maintain `COORDINATOR_RECOVERY.md` and restart a registered main coordinator after context-window exhaustion
@@ -74,6 +75,8 @@ Common commands:
 
 ```bash
 python "$MANAGER" --state-dir .codex/tmux-workers list
+python "$MANAGER" --state-dir .codex/tmux-workers constraints --print
+python "$MANAGER" --state-dir .codex/tmux-workers constraints --tensorboard-port-range 16006-16099
 python "$MANAGER" --state-dir .codex/tmux-workers compact-memory --print --context-pack
 python "$MANAGER" --state-dir .codex/tmux-workers compact-memory --note "Audit branch is waiting on metrics." --decision "Do not launch duplicate audit workers." --next-action "Check jobs and compact memory at next checkpoint."
 python "$MANAGER" --state-dir .codex/tmux-workers progress audit-a --lines 20
@@ -118,6 +121,7 @@ python "$MANAGER" \
 
 Context budget defaults:
 
+- `COORDINATOR_CONSTRAINTS.md` is the project-wide operating contract. Workers, branch managers, resumed workers, consultation workers, and recovered coordinators are prompted to read it before their task-specific instructions.
 - `progress` defaults to concise tails; use larger `--lines` only for diagnosis.
 - `COORDINATOR_CONTEXT_PACK.md` is the shortest reload packet; `COORDINATOR_MEMORY.md` is the coordinator's compact working memory.
 - `COORDINATOR_SCHEDULE.md` and `CONSULT_CONTEXT.md` contain summaries and evidence paths, not full worker transcripts.
@@ -191,6 +195,8 @@ Runtime state is written under the selected `--state-dir`, normally:
 Important files:
 
 - `workers.json`: worker registry
+- `COORDINATOR_CONSTRAINTS.md`: unified constraints loaded by all launched Codex processes
+- `coordinator_constraints_events.jsonl`: append-only constraints changes
 - `COORDINATOR_CONTEXT_PACK.md`: shortest reload packet for the main coordinator
 - `COORDINATOR_MEMORY.md`: compact coordinator working memory
 - `COORDINATOR_SCHEDULE.md`: user-auditable coordinator plan

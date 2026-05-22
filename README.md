@@ -12,7 +12,7 @@ This repository packages two Codex skills for long-running autonomous work with 
 
 - `tmux-codex-parallel-workers`
   - Launches, supervises, health-monitors, interrupts, resumes, and stops independent Codex CLI workers in tmux windows.
-  - Supports visible `autonomous-experiment` workers, subordinate `branch-manager` workers, manager-mediated `peer-send` worker messages, read-only consultation workers, coordinator context packs, compact memory, scheduling docs, coordinator recovery handoffs, worker progress/report files, background job registries, optional git worktrees, health recovery for transient Codex pane errors, and main-coordinator restart after context-window exhaustion.
+  - Supports visible `autonomous-experiment` workers, subordinate `branch-manager` workers, manager-mediated `peer-send` worker messages, read-only consultation workers, coordinator constraints, context packs, compact memory, scheduling docs, coordinator recovery handoffs, worker progress/report files, background job registries, optional git worktrees, health recovery for transient Codex pane errors, and main-coordinator restart after context-window exhaustion.
 
 Together, the two skills form an autonomous multiprocess management framework: a main Codex coordinator keeps final judgment and integration authority, while separate tmux Codex workers execute branch tasks in parallel.
 
@@ -61,10 +61,12 @@ README updates should name the feature, explain why it matters, and include a mi
   |     |
   |     |-- .codex/tmux-workers/
   |           |-- workers.json             -> worker registry
+  |           |-- COORDINATOR_CONSTRAINTS.md -> 所有子进程优先加载的统一约束
   |           |-- COORDINATOR_CONTEXT_PACK.md -> 主进程最短上下文包
   |           |-- COORDINATOR_MEMORY.md    -> 主进程压缩工作记忆
   |           |-- COORDINATOR_SCHEDULE.md  -> 主进程调度总览文档
   |           |-- COORDINATOR_RECOVERY.md  -> 主进程重启接管 handoff
+  |           |-- coordinator_constraints_events.jsonl -> 统一约束事件
   |           |-- coordinator_memory_events.jsonl -> 压缩记忆事件
   |           |-- schedule_events.jsonl     -> 调度事件日志
   |           |-- peer_messages.jsonl       -> worker 横向消息日志
@@ -205,6 +207,49 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - 主进程做出重要判断后，应运行 `compact-memory --note ... --decision ... --next-action ...`，把聊天上下文里的关键状态压缩进文件。
 - 咨询 worker 默认也应简洁回答，必要时给出文件路径和命令，让用户自己追溯完整证据。
 
+#### 2.3.1 统一运行约束
+
+主进程应维护：
+
+```text
+.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md
+```
+
+这是所有 tmux Codex 子进程必须优先加载的统一约束文件，优先级高于单个 worker 的任务 prompt。它用于记录跨 worker 的资源、安全和运行规则，例如：
+
+- TensorBoard/dashboard 安全端口范围；
+- dashboard 默认只绑定 `127.0.0.1`；
+- GPU、端口、输出目录、checkpoint、数据集的所有权；
+- remote job 的 host/session/log/liveness 记录要求；
+- 禁止无授权 `rm -rf`、删除 checkpoint、杀无关进程；
+- 共享数据、缓存和结果目录的不可覆盖规则。
+
+查看或初始化默认约束：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  constraints --print
+```
+
+设置 TensorBoard 安全端口范围：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  constraints --tensorboard-port-range 16006-16099
+```
+
+追加项目级约束：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  constraints --append "所有 TensorBoard 必须绑定 127.0.0.1，并用 --resource port:<PORT> 记录端口所有权。"
+```
+
+manager 会把这个约束文件写进 worker plan、worker prompt、resume prompt、branch-manager prompt、consult prompt 和 recovered coordinator prompt。worker 启动时会先收到“先读统一约束，再读任务 prompt”的指令。
+
 推荐的信息流是：
 
 ```text
@@ -260,6 +305,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 初始化后会生成：
 
 ```text
+.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md
 .codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md
 .codex/tmux-workers/COORDINATOR_MEMORY.md
 .codex/tmux-workers/COORDINATOR_SCHEDULE.md
@@ -962,7 +1008,7 @@ The Python scripts under `tmux-codex-parallel-workers/scripts/` are not optional
 
 ### `codex_tmux_manager.py`
 
-Main tmux Codex worker manager. It provides commands to initialize state, register/recover the main coordinator, launch workers, send or interrupt prompts, start consultation windows, start normal and health supervisors, track background jobs, resume workers, collect reports, compact coordinator memory, and maintain the coordinator context pack, memory, schedule, and recovery handoff documents.
+Main tmux Codex worker manager. It provides commands to initialize state, register/recover the main coordinator, launch workers, send or interrupt prompts, start consultation windows, start normal and health supervisors, track background jobs, resume workers, collect reports, maintain unified coordinator constraints, compact coordinator memory, and maintain the coordinator context pack, memory, schedule, and recovery handoff documents.
 
 Typical command:
 
@@ -971,6 +1017,7 @@ MANAGER="${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/
 
 python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers init --cwd "$PWD"
 python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
+python "$MANAGER" --state-dir .codex/tmux-workers constraints --tensorboard-port-range 16006-16099
 python "$MANAGER" --state-dir .codex/tmux-workers compact-memory --print --context-pack
 python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers launch worker-a --cwd "$PWD" --task "Do one bounded branch task and report back."
 ```
@@ -1097,6 +1144,7 @@ tmux attach -t codex-workers
 - Branch managers may coordinate child workers inside their assigned scope, but final merge, promotion, cross-branch resource decisions, and user-facing conclusions remain coordinator-owned unless explicitly delegated.
 - Worker-to-worker communication must go through `peer-send`; peer messages are evidence/dependency notes, not authority to change scope or resources.
 - The framework records worker state under `.codex/tmux-workers/` so users can audit launches, inbox messages, progress, reports, captures, jobs, and scheduling decisions.
+- The coordinator should maintain `COORDINATOR_CONSTRAINTS.md` before launching workers. All launched/resumed workers, branch managers, consultation workers, and recovered coordinators are instructed to read it before task-specific prompts.
 - The coordinator should use `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as short working memory, and should run `compact-memory --note ... --decision ... --next-action ...` after meaningful decisions.
 - Register tmux-hosted main coordinators with `register-coordinator` when long autonomous recovery matters. A recovered coordinator must start from `COORDINATOR_RECOVERY.md` and `COORDINATOR_SCHEDULE.md`, not from stale memory.
 - Default coordinator checks should start from `compact-memory --print --context-pack`, `list`, `jobs`, and `progress --lines 20`; schedule, collect, larger captures, or raw artifacts are for concrete diagnosis or final review.

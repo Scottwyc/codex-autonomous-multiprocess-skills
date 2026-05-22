@@ -1,6 +1,6 @@
 ---
 name: tmux-codex-parallel-workers
-description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in tmux windows for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-window autonomous workers, visible autonomous experiment workers, subordinate branch-manager workers, manager-mediated worker-to-worker communication, compact coordinator memory/context packs, a read-only user consultation window, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
+description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in tmux windows for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-window autonomous workers, visible autonomous experiment workers, subordinate branch-manager workers, manager-mediated worker-to-worker communication, unified coordinator constraints, compact coordinator memory/context packs, a read-only user consultation window, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
 ---
 
 # Tmux Codex Parallel Workers
@@ -29,12 +29,16 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
 3. Record state in the project.
    - Use a project-local state directory, default `.codex/tmux-workers/`.
    - Keep worker prompts, logs, work plans, progress files, reports, inbox messages, status files, captures, and `workers.json` registry there.
+   - Keep `.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md` current as the coordinator-wide constraint contract. All launched workers, branch managers, consultation workers, resumed workers, and recovered coordinators must read it before their task-specific prompt.
    - Keep `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` current so the user can audit the coordinator's worker plan, scheduling decisions, current results, and next actions.
    - The manager mounts the state directory into worker Codex processes with `--add-dir` when using `workspace-write`; this is required when a worker runs in an isolated git worktree and the state directory is outside its `--cd` root.
    - Workers may update their progress/report and use manager commands such as `job-add`, but should not manually edit `workers.json`, status files, schedule files, or registry files.
 4. Do not launch workers into shared resources blindly.
+   - Record project-wide resource rules in `COORDINATOR_CONSTRAINTS.md` before launching workers.
+   - Use `constraints --append ...` or `constraints --tensorboard-port-range 16006-16099` to set shared requirements such as TensorBoard safe ports, dashboard bind hosts, output roots, SSH/remote-job rules, or cleanup limits.
    - Assign GPU IDs, ports, output directories, checkpoint paths, and result folders explicitly.
    - Use `--resource` tokens such as `gpu:0`, `port:6006`, or `out:results/run-a` so the manager can catch exact conflicts.
+   - TensorBoard/dashboard workers should bind to `127.0.0.1` by default, use a coordinator-approved port, and register that port as a resource or job/progress entry.
 5. Capture and review worker output before acting on it.
    - Treat worker changes as untrusted until inspected by the coordinator.
    - For experiment execution that the user should be able to watch, use `--worker-kind autonomous-experiment` or `--mode interactive`; this opens a visible Codex worker session in tmux with `--no-alt-screen`.
@@ -239,6 +243,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 Inspect workers:
 
 ```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers constraints --print
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers constraints --tensorboard-port-range 16006-16099
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --print --context-pack
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --note "Current branch manager reports are stable." --decision "Wait for running jobs before launching more workers." --next-action "Check jobs and compact memory at the next checkpoint."
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers list
@@ -342,6 +348,7 @@ The script defaults to:
 - job registries: `.codex/tmux-workers/jobs/<worker>.json`
 - optional git worktrees: `.codex/tmux-workers/git-worktrees/<worker>/`
 - coordinator schedule: `.codex/tmux-workers/COORDINATOR_SCHEDULE.md`
+- coordinator constraints: `.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md`
 - consultation context: `.codex/tmux-workers/consult/CONSULT_CONTEXT.md`
 - consultation prompt: `.codex/tmux-workers/consult/consult.prompt.md`
 - normal supervisor window/status/log: `cw-supervisor`, `.codex/tmux-workers/status/supervisor.json`, `.codex/tmux-workers/logs/supervisor.log`
@@ -406,6 +413,8 @@ The manager also maintains two smaller coordinator-memory files:
 - `.codex/tmux-workers/COORDINATOR_MEMORY.md`: compact working memory with active workers, latest summaries, recent decisions, peer messages, resources, and evidence paths.
 
 Use `compact-memory --print --context-pack` before routine checkpoints, and use `compact-memory --note ... --decision ... --next-action ...` after meaningful coordination decisions. This is the main mechanism for reducing pressure on the model context window.
+
+The manager also maintains `.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md`. This is the shared operating contract for all launched Codex processes. Update it before launching workers when the project has global requirements such as TensorBoard safe port ranges, GPU/resource ownership, output roots, dashboard bind hosts, SSH/remote-job conventions, cleanup limits, or dataset/checkpoint immutability rules.
 
 Use `schedule-note` whenever the coordinator makes a non-obvious decision, such as launching a worker, changing resource allocation, accepting a result, deferring a merge, recovering a stalled worker, or stopping a job. The document should let a user answer:
 

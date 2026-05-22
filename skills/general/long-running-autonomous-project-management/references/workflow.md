@@ -16,6 +16,7 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - Start the next experiment, evaluation, data check, or refactor that advances the objective.
    - By default, organize and schedule non-blocking branch workers through `tmux-codex-parallel-workers` and keep the current session as coordinator.
    - Skip tmux workers only when the user disables worker parallelism, the environment lacks `tmux` or `codex`, cost/quota constraints make extra Codex processes inappropriate, or there is no independent side branch worth parallelizing.
+   - Before launching workers, refresh `COORDINATOR_CONSTRAINTS.md` with coordinator-wide rules that every child process must load first, including resource ownership, TensorBoard/dashboard safe ports, bind hosts, output roots, cleanup limits, and remote-job conventions.
    - If the main coordinator itself is running inside tmux, register it with `register-coordinator` so a future recovered coordinator can read `COORDINATOR_RECOVERY.md` and take over existing workers instead of rediscovering everything from scratch.
    - For long-lived work, start the read-only consultation worker so the user can ask status and evidence questions in its tmux window without interrupting the coordinator.
    - For experiment branches, prefer visible `--worker-kind autonomous-experiment` workers so the user can attach to tmux and watch the Codex worker's actual planning, checks, commands, diagnostics, and handoff.
@@ -59,9 +60,11 @@ This reference describes a reusable autonomous follow-up loop for long-running p
 - Let front-line workers communicate through `peer-send` for short evidence paths, blockers, and dependency notices. Scope/resource changes still require a branch-manager or main-coordinator scheduling decision.
 - Keep `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` and `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` current so worker state, scheduling decisions, and user-consultation answers remain auditable.
 - Keep `.codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md` and `.codex/tmux-workers/COORDINATOR_MEMORY.md` current so the main coordinator can compress working memory and avoid relying on long chat history.
+- Keep `.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md` current so all launched/resumed child processes inherit the same resource, safety, TensorBoard, output, remote-job, and cleanup constraints before task-specific prompts.
 - Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` current so a new main coordinator can recover the mission, worker graph, resources, jobs, branch summaries, peer messages, and next checkpoints after the old coordinator dies or exhausts context.
 - Keep compact memory, schedule, and consultation context compact. They should contain worker status, concise report/progress excerpts, decisions, next checkpoints, and paths to evidence, not full tmux scrollback or raw experiment logs.
 - After every meaningful decision or phase checkpoint, run `compact-memory --note ... --decision ... --next-action ...`; this preserves the decision outside the model context window.
+- When global operating rules change, run `constraints --append ...` or a targeted helper such as `constraints --tensorboard-port-range 16006-16099`, then record the reason with `schedule-note`.
 - Do not keep the coordinator alive with bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded Python loops. Put those jobs in tmux or background processes with registered PID/log/resource ownership.
 
 ## Monitoring Cadence
