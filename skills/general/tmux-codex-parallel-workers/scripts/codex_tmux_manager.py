@@ -95,6 +95,18 @@ def consult_log_path(base: Path) -> Path:
     return base / "logs" / "consult.log"
 
 
+def coordinator_handoff_path(base: Path) -> Path:
+    return base / "COORDINATOR_RECOVERY.md"
+
+
+def coordinator_status_path(base: Path) -> Path:
+    return base / "status" / "coordinator.json"
+
+
+def coordinator_log_path(base: Path) -> Path:
+    return base / "logs" / "coordinator.log"
+
+
 def supervisor_status_path(base: Path) -> Path:
     return base / "status" / "supervisor.json"
 
@@ -226,6 +238,148 @@ def load_peer_messages(base: Path, limit: int = 40) -> list[dict[str, Any]]:
     return records
 
 
+def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str = "refresh") -> str:
+    workers = registry.get("workers", {})
+    coordinator = registry.get("coordinator") or {}
+    mission = registry.get("mission", "未设置")
+    session = registry.get("session", DEFAULT_SESSION)
+    rows = []
+    for name, worker in sorted(workers.items()):
+        rows.append(
+            [
+                name,
+                effective_state(worker, session),
+                worker.get("worker_kind", "standard"),
+                worker.get("parent_worker") or "main",
+                worker.get("mode", "-"),
+                f"{worker.get('session', session)}:{worker.get('window', '-')}",
+                ", ".join(worker.get("resources", [])) or "-",
+                one_line(extract_markdown_section(Path(worker.get("workplan_file", "")), "Task", 160), 160),
+            ]
+        )
+
+    events = load_schedule_events(base, 30)
+    peer_messages = load_peer_messages(base, 20)
+    lines = [
+        "# Coordinator Recovery Handoff",
+        "",
+        f"Updated: {now_iso()}",
+        f"Reason: {reason}",
+        f"State dir: `{base}`",
+        f"Mission: {mission}",
+        "",
+        "## Registered Coordinator",
+        "",
+    ]
+    if coordinator:
+        target = coordinator.get("target", "")
+        lines.extend(
+            [
+                f"- Current target: `{target or '-'}`",
+                f"- Target state: `{'running' if target and tmux_target_present(target) else 'not-present'}`",
+                f"- Working directory: `{coordinator.get('cwd', '-')}`",
+                f"- Recovery window prefix: `{coordinator.get('restart_window_prefix', 'cw-main-recovered')}`",
+                f"- Model/reasoning: `{coordinator.get('model', '-')}/{coordinator.get('reasoning_effort', '-')}`",
+                f"- Registered at: {coordinator.get('registered_at', '-')}",
+                f"- Last recovery at: {coordinator.get('last_recovery_at', '-')}",
+                f"- Recovery count: {coordinator.get('recovery_count', 0)}",
+            ]
+        )
+    else:
+        lines.append("- No coordinator registered yet. Use `register-coordinator` from the tmux-hosted main Codex pane.")
+
+    lines.extend(
+        [
+            "",
+            "## Recovery Protocol For New Main Coordinator",
+            "",
+            "1. Use the `long-running-autonomous-project-management` and `tmux-codex-parallel-workers` skills.",
+            "2. Treat this as a resumed coordinator session, not a new project. Do not restart existing workers from scratch.",
+            "3. First inspect the durable control plane: schedule, worker registry, progress/report tails, jobs, branch-manager summaries, peer messages, and consultation context.",
+            "4. Reconstruct the active mission, active workers, branch-manager hierarchy, resource ownership, blockers, and next checkpoints.",
+            "5. Record a `schedule-note` that coordinator recovery happened, then continue normal autonomous supervision and integration.",
+            "6. Keep the recovered coordinator context lean: consume summaries and evidence paths first; load long logs only for concrete diagnosis or final review.",
+            "",
+            "## First Commands",
+            "",
+            "```bash",
+            f"python {MANAGER_PATH} --state-dir {base} schedule --print",
+            f"python {MANAGER_PATH} --state-dir {base} list",
+            f"python {MANAGER_PATH} --state-dir {base} jobs",
+            f"python {MANAGER_PATH} --state-dir {base} collect --lines 30",
+            f"python {MANAGER_PATH} --state-dir {base} consult-context --print",
+            "```",
+            "",
+            "## Worker Overview",
+            "",
+        ]
+    )
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "模式", "tmux", "资源", "任务摘要"], rows) if rows else "暂无 worker。")
+    lines.extend(["", "## Key Files", ""])
+    for name, worker in sorted(workers.items()):
+        lines.extend(
+            [
+                f"### {name}",
+                f"- workplan: `{worker.get('workplan_file', '-')}`",
+                f"- progress: `{worker.get('progress_file', '-')}`",
+                f"- report: `{worker.get('report_file', '-')}`",
+                f"- jobs: `{worker.get('jobs_file', '-')}`",
+                f"- status: `{worker.get('status_file', '-')}`",
+                f"- log: `{worker.get('log_file', '-')}`",
+                f"- captures: `{base / 'captures' / name}`",
+                "",
+            ]
+        )
+    lines.extend(["## Recent Schedule Events", ""])
+    if events:
+        lines.append(
+            markdown_table(
+                ["Time", "Event", "Worker", "Detail"],
+                [[event.get("timestamp", ""), event.get("event", ""), event.get("worker", ""), one_line(event.get("detail", ""), 140)] for event in events],
+            )
+        )
+    else:
+        lines.append("No recent schedule events.")
+    lines.extend(["", "## Recent Peer Messages", ""])
+    if peer_messages:
+        lines.append(
+            markdown_table(
+                ["Time", "Source", "Target", "Summary", "Inbox"],
+                [
+                    [
+                        item.get("timestamp", ""),
+                        item.get("source", ""),
+                        item.get("target", ""),
+                        one_line(item.get("summary", ""), 120),
+                        item.get("inbox_file", ""),
+                    ]
+                    for item in peer_messages
+                ],
+            )
+        )
+    else:
+        lines.append("No recent peer messages.")
+    lines.extend(
+        [
+            "",
+            "## Coordinator-Owned Decisions Still Required",
+            "",
+            "- Final merge/promotion/user-facing conclusions remain coordinator-owned.",
+            "- Branch-manager summaries should be reviewed before drilling into child worker transcripts.",
+            "- Scope/resource changes must be written through `schedule-note`.",
+            "- Existing background jobs should be checked before launching duplicates.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str = "refresh") -> Path:
+    path = coordinator_handoff_path(base)
+    write_text(path, render_coordinator_handoff(base, registry, reason))
+    return path
+
+
 def ensure_session(session: str, cwd: Path) -> None:
     if tmux("has-session", "-t", session, check=False).returncode == 0:
         return
@@ -237,6 +391,36 @@ def window_exists(session: str, window: str) -> bool:
     if listed.returncode != 0:
         return False
     return window in listed.stdout.splitlines()
+
+
+def tmux_target_present(target: str) -> bool:
+    if not target:
+        return False
+    return tmux("list-panes", "-t", target, "-F", "#{pane_id}", check=False).returncode == 0
+
+
+def infer_current_tmux_target() -> str | None:
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    result = tmux("display-message", "-p", "-t", pane, "#S:#W.#{pane_index}", check=False)
+    if result.returncode != 0:
+        return None
+    target = result.stdout.strip()
+    return target or None
+
+
+def unique_window_name(session: str, prefix: str) -> str:
+    base = safe_name(prefix)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = safe_name(f"{base}-{stamp}")
+    if not window_exists(session, candidate):
+        return candidate
+    for index in range(2, 100):
+        candidate = safe_name(f"{base}-{stamp}-{index}")
+        if not window_exists(session, candidate):
+            return candidate
+    raise SystemExit(f"Cannot allocate a free tmux window name for prefix: {prefix}")
 
 
 def send_prompt(
@@ -378,6 +562,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
     session = registry.get("session", DEFAULT_SESSION)
     mission = registry.get("mission", "未设置。使用 schedule-note 或 init --mission 记录当前总目标。")
     consult = registry.get("consult") or {}
+    coordinator = registry.get("coordinator") or {}
     lines: list[str] = [
         "# Codex Tmux Workers 调度总览",
         "",
@@ -389,9 +574,45 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
         "上下文预算：调度文档只保留摘要和证据路径；完整日志、长输出、完整 diff 和 tmux transcript 保存在对应 artifact/log/capture 文件中。",
         f"当前总目标：{mission}",
         "",
-        "## 用户咨询窗口",
+        "## 主进程恢复与接管",
         "",
     ]
+    if coordinator:
+        coord_target = coordinator.get("target", "")
+        coord_state = "running" if coord_target and tmux_target_present(coord_target) else "not-present"
+        lines.extend(
+            [
+                "- 注册状态：`registered`",
+                f"- 当前主进程 target：`{coord_target or '-'}`",
+                f"- target 状态：`{coord_state}`",
+                f"- 工作目录：`{coordinator.get('cwd', '-')}`",
+                f"- 恢复窗口前缀：`{coordinator.get('restart_window_prefix', 'cw-main-recovered')}`",
+                f"- model：`{coordinator.get('model', '-')}`",
+                f"- reasoning effort：`{coordinator.get('reasoning_effort', '-')}`",
+                f"- 接管 handoff：`{coordinator.get('handoff_file', coordinator_handoff_path(base))}`",
+                f"- recovery count：{coordinator.get('recovery_count', 0)}",
+                f"- last recovery：{coordinator.get('last_recovery_at', '-')}",
+                f"- 启用自动接管的 health supervisor：`python {MANAGER_PATH} --state-dir {base} --session {session} start-health-supervisor --restart-main-on-context-full --restart-main-when-missing`",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- 未注册主进程。若主 Codex 本身运行在 tmux 中，建议从主进程窗口执行：",
+                "",
+                "```bash",
+                "tmux display-message -p '#S:#W.#{pane_index}'",
+                f"python {MANAGER_PATH} --state-dir {base} --session {session} register-coordinator --target <SESSION:WINDOW.PANE> --cwd \"$PWD\"",
+                "```",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## 用户咨询窗口",
+            "",
+        ]
+    )
     if consult:
         consult_session = consult.get("session", session)
         consult_window = consult.get("window", "")
@@ -421,6 +642,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             f"- 查看 jobs：`python {MANAGER_PATH} --state-dir {base} jobs`",
             f"- 查看 worker 横向消息：`{peer_messages_path(base)}`",
             f"- 查看咨询上下文：`python {MANAGER_PATH} --state-dir {base} consult-context --print`",
+            f"- 查看主进程接管 handoff：`{coordinator_handoff_path(base)}`",
             f"- 汇总收口：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
             f"- 连接 tmux：`tmux attach -t {session}`",
             "",
@@ -562,6 +784,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
     workers = registry.get("workers", {})
     session = registry.get("session", DEFAULT_SESSION)
     mission = registry.get("mission", "未设置")
+    coordinator = registry.get("coordinator") or {}
     rows = []
     for name, worker in sorted(workers.items()):
         rows.append(
@@ -587,6 +810,8 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         f"调度总览：`{schedule_doc_path(base)}`",
         f"调度事件：`{schedule_events_path(base)}`",
         f"worker 横向消息：`{peer_messages_path(base)}`",
+        f"主进程接管 handoff：`{coordinator_handoff_path(base)}`",
+        f"注册主进程 target：`{coordinator.get('target', '-') if coordinator else '-'}`",
         "",
         "## 咨询 worker 规则",
         "",
@@ -661,6 +886,7 @@ def refresh_schedule_doc(base: Path, registry: dict[str, Any] | None = None) -> 
     path = schedule_doc_path(base)
     write_text(path, render_schedule_doc(base, registry))
     refresh_consult_context(base, registry)
+    write_coordinator_handoff(base, registry)
     return path
 
 
@@ -1070,6 +1296,10 @@ def health_supervisor_command(
     watch_targets: list[str],
     observe_targets: list[str],
     no_workers: bool,
+    no_coordinator: bool,
+    restart_main_on_context_full: bool,
+    restart_main_when_missing: bool,
+    keep_old_main: bool,
     dry_run: bool,
     escape_after: bool,
     recovery_prompt: str | None,
@@ -1092,6 +1322,14 @@ def health_supervisor_command(
     ]
     if no_workers:
         cmd.append("--no-workers")
+    if no_coordinator:
+        cmd.append("--no-coordinator")
+    if restart_main_on_context_full:
+        cmd.append("--restart-main-on-context-full")
+    if restart_main_when_missing:
+        cmd.append("--restart-main-when-missing")
+    if keep_old_main:
+        cmd.append("--keep-old-main")
     for target in watch_targets:
         cmd.extend(["--watch-target", target])
     for target in observe_targets:
@@ -1136,6 +1374,210 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"session={args.session}")
     print(f"state_dir={base}")
     print(f"schedule={schedule_path}")
+
+
+def cmd_register_coordinator(args: argparse.Namespace) -> None:
+    require_binary("tmux")
+    base = state_dir(args.state_dir)
+    cwd = Path(args.cwd).expanduser().resolve()
+    target = args.target
+    if not target or target == "auto":
+        target = infer_current_tmux_target()
+    if not target:
+        raise SystemExit("No coordinator tmux target provided and current process is not inside tmux. Pass --target SESSION:WINDOW.PANE.")
+    if not args.allow_missing and not tmux_target_present(target):
+        raise SystemExit(f"coordinator target is not present: {target}; pass --allow-missing only for tests or pre-registration")
+    model, reasoning_effort = resolve_model_settings(args)
+    registry = load_registry(base)
+    registry["session"] = args.session
+    registry["state_dir"] = str(base)
+    registry["default_worker_model"] = DEFAULT_WORKER_MODEL
+    registry["default_worker_reasoning"] = DEFAULT_WORKER_REASONING
+    if args.mission:
+        registry["mission"] = args.mission
+    previous = registry.get("coordinator") or {}
+    coordinator = {
+        "role": "main-coordinator",
+        "target": target,
+        "session": args.session,
+        "cwd": str(cwd),
+        "restart_window_prefix": safe_name(args.restart_window_prefix),
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "best_model_default": not args.no_best_model,
+        "profile": args.profile,
+        "sandbox": args.sandbox,
+        "approval": args.approval,
+        "search": bool(args.search),
+        "handoff_file": str(coordinator_handoff_path(base)),
+        "status_file": str(coordinator_status_path(base)),
+        "log_file": str(coordinator_log_path(base)),
+        "registered_at": previous.get("registered_at", now_iso()),
+        "updated_at": now_iso(),
+        "recovery_count": int(previous.get("recovery_count", 0)),
+        "last_recovery_at": previous.get("last_recovery_at"),
+        "previous_targets": previous.get("previous_targets", []),
+    }
+    registry["coordinator"] = coordinator
+    registry["updated_at"] = now_iso()
+    save_registry(base, registry)
+    write_text(coordinator_status_path(base), json.dumps({"state": "registered", "target": target, "updated_at": now_iso()}, ensure_ascii=False) + "\n")
+    append_manager_log(base, f"register-coordinator target={target} cwd={cwd}")
+    append_schedule_event(base, "register-coordinator", detail=f"Registered main coordinator target={target} cwd={cwd}")
+    handoff = write_coordinator_handoff(base, registry, "register-coordinator")
+    schedule_path = refresh_schedule_doc(base, registry)
+    print(f"coordinator={target}")
+    print(f"handoff={handoff}")
+    print(f"schedule={schedule_path}")
+
+
+def cmd_recover_coordinator(args: argparse.Namespace) -> None:
+    require_binary("tmux")
+    if not args.dry_run:
+        require_binary("codex")
+    base = state_dir(args.state_dir)
+    registry = load_registry(base)
+    coordinator = registry.get("coordinator") or {}
+    if not coordinator and not args.cwd:
+        raise SystemExit("No registered coordinator found. Run register-coordinator first or pass --cwd for manual recovery.")
+    cwd = Path(args.cwd or coordinator.get("cwd", os.getcwd())).expanduser().resolve()
+    session = args.session or coordinator.get("session", DEFAULT_SESSION)
+    ensure_session(session, cwd)
+    old_target = args.old_target or coordinator.get("target", "")
+    reason = args.reason or "manual-recovery"
+    window = safe_name(args.window) if args.window else unique_window_name(session, coordinator.get("restart_window_prefix", "cw-main-recovered"))
+    if window_exists(session, window):
+        if not args.force:
+            raise SystemExit(f"tmux window already exists: {session}:{window}; use --force to replace it")
+        tmux("kill-window", "-t", f"{session}:{window}", check=False)
+        time.sleep(0.5)
+
+    model = args.model if args.model is not None else coordinator.get("model")
+    reasoning_effort = args.reasoning_effort if args.reasoning_effort is not None else coordinator.get("reasoning_effort")
+    if not args.no_best_model and not model:
+        model = DEFAULT_WORKER_MODEL
+    if not args.no_best_model and not reasoning_effort:
+        reasoning_effort = DEFAULT_WORKER_REASONING
+    profile = args.profile if args.profile is not None else coordinator.get("profile")
+    sandbox = args.sandbox or coordinator.get("sandbox") or "danger-full-access"
+    approval = args.approval or coordinator.get("approval") or "never"
+    search = bool(args.search or coordinator.get("search"))
+
+    handoff = write_coordinator_handoff(base, registry, reason)
+    prompt_file = base / "tasks" / f"main-coordinator.recovery.{timestamp_slug()}.md"
+    prompt = f"""You are the recovered main Codex coordinator for a tmux-managed autonomous multiprocess run.
+
+The previous coordinator target was `{old_target or '-'}` and recovery reason is `{reason}`.
+
+Use the `long-running-autonomous-project-management` and `tmux-codex-parallel-workers` skills. Treat this as a continuation of the same autonomous run, not a fresh project.
+
+Immediate recovery protocol:
+
+1. Read the handoff file: {handoff}
+2. Read the schedule: {schedule_doc_path(base)}
+3. Inspect existing workers with:
+   python {MANAGER_PATH} --state-dir {base} list
+   python {MANAGER_PATH} --state-dir {base} jobs
+   python {MANAGER_PATH} --state-dir {base} collect --lines 30
+4. Reconstruct the mission, active workers, branch-manager hierarchy, resource ownership, open blockers, and next checkpoints from durable files.
+5. Do not restart existing workers from scratch. Resume, redirect, stop, or collect them only after checking their progress/report/jobs.
+6. Record the recovery with schedule-note, refresh consult context, and continue coordinating until the objective is complete or the user explicitly stops autonomous follow-up.
+7. Keep coordinator context lean: consume schedule/progress/report summaries first, and only load long logs or full captures when needed for diagnosis or final review.
+
+Key files:
+
+- State dir: {base}
+- Handoff: {handoff}
+- Schedule: {schedule_doc_path(base)}
+- Consultation context: {consult_context_path(base)}
+- Worker registry: {registry_path(base)}
+- Peer messages: {peer_messages_path(base)}
+"""
+    write_text(prompt_file, prompt)
+
+    if args.dry_run:
+        append_manager_log(base, f"recover-coordinator dry-run reason={reason} old_target={old_target} new_window={window}")
+        append_schedule_event(base, "coordinator-recovery-dry-run", detail=f"Would recover coordinator old={old_target} new={session}:{window} reason={reason}")
+        print(f"dry_run=true")
+        print(f"would_launch={session}:{window}")
+        print(f"prompt={prompt_file}")
+        print(f"handoff={handoff}")
+        return
+
+    if args.kill_old and old_target and tmux_target_present(old_target):
+        tmux("kill-pane", "-t", old_target, check=False)
+        append_manager_log(base, f"recover-coordinator killed old target={old_target}")
+
+    log_file = coordinator_log_path(base)
+    status_file = coordinator_status_path(base)
+    command = codex_command(
+        mode="interactive",
+        cwd=cwd,
+        prompt_file=prompt_file,
+        log_file=log_file,
+        status_file=status_file,
+        add_dirs=[base],
+        model=model,
+        reasoning_effort=reasoning_effort,
+        profile=profile,
+        sandbox=sandbox,
+        approval=approval,
+        search=search,
+    )
+    tmux("new-window", "-t", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+    target = f"{session}:{window}"
+    tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
+    time.sleep(args.startup_wait)
+    send_prompt(
+        target,
+        "Please read and execute this coordinator recovery prompt file: "
+        f"{prompt_file}\n"
+        f"Start by reading the handoff file: {handoff}\n"
+        "Continue the existing autonomous multiprocess run; do not restart workers from scratch.",
+    )
+
+    previous_targets = list(coordinator.get("previous_targets", []))
+    if old_target:
+        previous_targets.append({"target": old_target, "ended_at": now_iso(), "reason": reason})
+        previous_targets = previous_targets[-20:]
+    coordinator.update(
+        {
+            "role": "main-coordinator",
+            "target": target,
+            "session": session,
+            "window": window,
+            "cwd": str(cwd),
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "best_model_default": not args.no_best_model,
+            "profile": profile,
+            "sandbox": sandbox,
+            "approval": approval,
+            "search": search,
+            "handoff_file": str(handoff),
+            "prompt_file": str(prompt_file),
+            "status_file": str(status_file),
+            "log_file": str(log_file),
+            "last_recovery_at": now_iso(),
+            "last_recovery_reason": reason,
+            "recovery_count": int(coordinator.get("recovery_count", 0)) + 1,
+            "previous_targets": previous_targets,
+            "updated_at": now_iso(),
+        }
+    )
+    coordinator.setdefault("registered_at", now_iso())
+    registry["coordinator"] = coordinator
+    registry["session"] = session
+    registry["updated_at"] = now_iso()
+    save_registry(base, registry)
+    write_text(status_file, json.dumps({"state": "launched", "target": target, "recovered_at": now_iso(), "reason": reason}, ensure_ascii=False) + "\n")
+    append_manager_log(base, f"recover-coordinator old={old_target} new={target} reason={reason}")
+    append_schedule_event(base, "coordinator-recovery", detail=f"Recovered coordinator old={old_target} new={target} reason={reason}")
+    refresh_schedule_doc(base, registry)
+    print(f"recovered_coordinator={target}")
+    print(f"prompt={prompt_file}")
+    print(f"handoff={handoff}")
+    print(f"attach=tmux attach -t {session}  # then switch to window {window}")
 
 
 def cmd_launch(args: argparse.Namespace) -> None:
@@ -1828,6 +2270,10 @@ def start_health_supervisor_window(
     watch_targets: list[str],
     observe_targets: list[str],
     no_workers: bool,
+    no_coordinator: bool,
+    restart_main_on_context_full: bool,
+    restart_main_when_missing: bool,
+    keep_old_main: bool,
     dry_run: bool,
     escape_after: bool,
     recovery_prompt: str | None,
@@ -1852,6 +2298,10 @@ def start_health_supervisor_window(
         watch_targets,
         observe_targets,
         no_workers,
+        no_coordinator,
+        restart_main_on_context_full,
+        restart_main_when_missing,
+        keep_old_main,
         dry_run,
         escape_after,
         recovery_prompt,
@@ -1861,7 +2311,9 @@ def start_health_supervisor_window(
         base,
         f"start-health-supervisor session={session} window={window} interval={interval} "
         f"stable_seconds={stable_seconds} cooldown={cooldown} watch_targets={watch_targets} observe_targets={observe_targets} "
-        f"no_workers={no_workers} dry_run={dry_run}",
+        f"no_workers={no_workers} no_coordinator={no_coordinator} "
+        f"restart_main_on_context_full={restart_main_on_context_full} restart_main_when_missing={restart_main_when_missing} "
+        f"keep_old_main={keep_old_main} dry_run={dry_run}",
     )
     append_schedule_event(
         base,
@@ -1869,7 +2321,9 @@ def start_health_supervisor_window(
         detail=(
             f"Started health supervisor at {session}:{window} interval={interval} "
             f"stable_seconds={stable_seconds} cooldown={cooldown} watch_targets={watch_targets} "
-            f"observe_targets={observe_targets} no_workers={no_workers} dry_run={dry_run}"
+            f"observe_targets={observe_targets} no_workers={no_workers} no_coordinator={no_coordinator} "
+            f"restart_main_on_context_full={restart_main_on_context_full} restart_main_when_missing={restart_main_when_missing} "
+            f"keep_old_main={keep_old_main} dry_run={dry_run}"
         ),
     )
     refresh_schedule_doc(base, load_registry(base))
@@ -1890,6 +2344,10 @@ def cmd_start_health_supervisor(args: argparse.Namespace) -> None:
         args.watch_target or [],
         args.observe_target or [],
         args.no_workers,
+        args.no_coordinator,
+        args.restart_main_on_context_full,
+        args.restart_main_when_missing,
+        args.keep_old_main,
         args.dry_run,
         args.escape_after,
         args.recovery_prompt,
@@ -2312,6 +2770,39 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--mission", help="Coordinator mission written into COORDINATOR_SCHEDULE.md.")
     init.set_defaults(func=cmd_init)
 
+    register_coord = sub.add_parser("register-coordinator", help="Register the current/main Codex tmux pane for durable coordinator recovery.")
+    register_coord.add_argument("--target", default="auto", help="Coordinator tmux target, as SESSION:WINDOW.PANE. Use auto inside tmux.")
+    register_coord.add_argument("--cwd", default=os.getcwd(), help="Working directory for recovered coordinator sessions.")
+    register_coord.add_argument("--mission", help="Optional mission update written into COORDINATOR_SCHEDULE.md.")
+    register_coord.add_argument("--restart-window-prefix", default="cw-main-recovered", help="Prefix for recovered main coordinator tmux windows.")
+    register_coord.add_argument("--allow-missing", action="store_true", help="Allow registering a target not currently present; intended for tests/pre-registration.")
+    register_coord.add_argument("--model", help=f"Codex model for recovered coordinators. Default best model: {DEFAULT_WORKER_MODEL}.")
+    register_coord.add_argument("--reasoning-effort", help=f"Codex reasoning effort for recovered coordinators. Default best effort: {DEFAULT_WORKER_REASONING}.")
+    register_coord.add_argument("--no-best-model", action="store_true", help="Do not apply the manager's default best model/reasoning for recovered coordinators.")
+    register_coord.add_argument("--profile")
+    register_coord.add_argument("--sandbox", default="danger-full-access")
+    register_coord.add_argument("--approval", default="never")
+    register_coord.add_argument("--search", action="store_true")
+    register_coord.set_defaults(func=cmd_register_coordinator)
+
+    recover_coord = sub.add_parser("recover-coordinator", help="Launch a new main coordinator Codex from durable worker state.")
+    recover_coord.add_argument("--old-target", help="Old coordinator tmux target to record and optionally kill.")
+    recover_coord.add_argument("--cwd", help="Working directory for the recovered coordinator; defaults to registered coordinator cwd.")
+    recover_coord.add_argument("--window", help="Explicit recovered coordinator tmux window name.")
+    recover_coord.add_argument("--reason", default="manual-recovery")
+    recover_coord.add_argument("--kill-old", action="store_true", help="Kill the old coordinator pane after preparing the recovery prompt.")
+    recover_coord.add_argument("--force", action="store_true", help="Replace an existing recovered coordinator window with the same name.")
+    recover_coord.add_argument("--startup-wait", type=int, default=8)
+    recover_coord.add_argument("--dry-run", action="store_true", help="Write recovery prompt/handoff and print the planned launch without starting Codex.")
+    recover_coord.add_argument("--model", help=f"Codex model for the recovered coordinator. Default best model: {DEFAULT_WORKER_MODEL}.")
+    recover_coord.add_argument("--reasoning-effort", help=f"Codex reasoning effort. Default best effort: {DEFAULT_WORKER_REASONING}.")
+    recover_coord.add_argument("--no-best-model", action="store_true", help="Do not apply default best model/reasoning when no explicit/registered model exists.")
+    recover_coord.add_argument("--profile")
+    recover_coord.add_argument("--sandbox", default=None)
+    recover_coord.add_argument("--approval", default=None)
+    recover_coord.add_argument("--search", action="store_true")
+    recover_coord.set_defaults(func=cmd_recover_coordinator)
+
     launch = sub.add_parser("launch", help="Launch a Codex worker in a new tmux window.")
     launch.add_argument("name", help="Stable worker name.")
     launch.add_argument("--task", help="Worker task text.")
@@ -2442,12 +2933,16 @@ def build_parser() -> argparse.ArgumentParser:
     start_health = sub.add_parser("start-health-supervisor", help="Start a tmux health supervisor that recovers Codex panes stuck on known transient errors.")
     start_health.add_argument("--cwd", default=os.getcwd())
     start_health.add_argument("--interval", type=int, default=30)
-    start_health.add_argument("--lines", type=int, default=12)
+    start_health.add_argument("--lines", type=int, default=40)
     start_health.add_argument("--stable-seconds", type=int, default=20)
     start_health.add_argument("--cooldown", type=int, default=120)
     start_health.add_argument("--watch-target", action="append", help="Extra interactive Codex target to auto-recover, as NAME=TMUX_TARGET. Use this for the main coordinator pane.")
     start_health.add_argument("--observe-target", action="append", help="Extra target to observe without auto-recovery, as NAME=TMUX_TARGET.")
     start_health.add_argument("--no-workers", action="store_true", help="Do not monitor workers from workers.json.")
+    start_health.add_argument("--no-coordinator", action="store_true", help="Do not monitor the registered main coordinator target.")
+    start_health.add_argument("--restart-main-on-context-full", action="store_true", help="When the registered coordinator hits context-window exhaustion, launch a recovered coordinator from durable state.")
+    start_health.add_argument("--restart-main-when-missing", action="store_true", help="When the registered coordinator target disappears, launch a recovered coordinator from durable state.")
+    start_health.add_argument("--keep-old-main", action="store_true", help="Do not kill the old coordinator pane when auto-recovering the main coordinator.")
     start_health.add_argument("--dry-run", action="store_true", help="Detect and log recovery actions without sending prompts.")
     start_health.add_argument("--escape-after", action="store_true", help="Send Escape after submitting a recovery prompt.")
     start_health.add_argument("--recovery-prompt", help="Override the default recovery prompt sent to stuck interactive Codex panes.")

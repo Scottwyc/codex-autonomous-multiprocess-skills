@@ -16,12 +16,13 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - Start the next experiment, evaluation, data check, or refactor that advances the objective.
    - By default, organize and schedule non-blocking branch workers through `tmux-codex-parallel-workers` and keep the current session as coordinator.
    - Skip tmux workers only when the user disables worker parallelism, the environment lacks `tmux` or `codex`, cost/quota constraints make extra Codex processes inappropriate, or there is no independent side branch worth parallelizing.
+   - If the main coordinator itself is running inside tmux, register it with `register-coordinator` so a future recovered coordinator can read `COORDINATOR_RECOVERY.md` and take over existing workers instead of rediscovering everything from scratch.
    - For long-lived work, start the read-only consultation worker so the user can ask status and evidence questions in its tmux window without interrupting the coordinator.
    - For experiment branches, prefer visible `--worker-kind autonomous-experiment` workers so the user can attach to tmux and watch the Codex worker's actual planning, checks, commands, diagnostics, and handoff.
    - For major branches, prefer `--worker-kind branch-manager` first. The branch manager receives the branch target and resource envelope, then launches child `autonomous-experiment` workers with `--parent-worker` and coordinates their peer messages and branch report.
    - Treat coordinator context as scarce: worker updates should be summaries with evidence paths; raw logs, full diffs, long tables, and complete transcripts should remain in files unless explicitly needed.
    - When a busy interactive worker needs an immediate redirect, use `interrupt-send`: the manager submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
-   - For long-lived tmux Codex operation, start `start-health-supervisor` to recover interactive panes stuck on known transient Codex network/subprocess errors. Include the coordinator pane with `--watch-target main=<SESSION:WINDOW.PANE>` only when the main Codex is itself running inside tmux.
+   - For long-lived tmux Codex operation, start `start-health-supervisor` to recover interactive panes stuck on known transient Codex network/subprocess errors. When the main Codex is registered inside tmux, use `--restart-main-on-context-full --restart-main-when-missing` so context-window exhaustion or a missing coordinator target launches a new coordinator through `recover-coordinator`.
 4. Monitor on a cadence.
    - Early launch: check frequently.
    - Stable run: check at a slower cadence.
@@ -56,6 +57,7 @@ This reference describes a reusable autonomous follow-up loop for long-running p
 - Use branch-manager workers when a branch would otherwise require the main coordinator to track many child runs directly. Give the branch manager explicit `--manager-scope`, owned output roots, and resource limits.
 - Let front-line workers communicate through `peer-send` for short evidence paths, blockers, and dependency notices. Scope/resource changes still require a branch-manager or main-coordinator scheduling decision.
 - Keep `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` and `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` current so worker state, scheduling decisions, and user-consultation answers remain auditable.
+- Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` current so a new main coordinator can recover the mission, worker graph, resources, jobs, branch summaries, peer messages, and next checkpoints after the old coordinator dies or exhausts context.
 - Keep the schedule and consultation context compact. They should contain worker status, concise report/progress excerpts, and paths to evidence, not full tmux scrollback or raw experiment logs.
 - Do not keep the coordinator alive with bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded Python loops. Put those jobs in tmux or background processes with registered PID/log/resource ownership.
 

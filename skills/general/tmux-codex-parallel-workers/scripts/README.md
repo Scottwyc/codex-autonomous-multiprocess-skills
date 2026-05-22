@@ -15,6 +15,7 @@ Responsibilities:
 - write manager-mediated `peer-send` messages between workers
 - write worker prompts, progress files, reports, status files, logs, inbox messages, and job registries
 - maintain `COORDINATOR_SCHEDULE.md`
+- maintain `COORDINATOR_RECOVERY.md` and restart a registered main coordinator after context-window exhaustion
 - start read-only consultation workers
 - start/stop the normal supervisor and health supervisor
 - send regular or interrupting coordinator messages
@@ -80,6 +81,38 @@ python "$MANAGER" --state-dir .codex/tmux-workers peer-send audit-a audit-b --me
 python "$MANAGER" --state-dir .codex/tmux-workers collect --lines 30
 ```
 
+Main coordinator restart handoff:
+
+```bash
+tmux display-message -p '#S:#W.#{pane_index}'
+
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  register-coordinator \
+  --target <SESSION:WINDOW.PANE> \
+  --cwd "$PWD" \
+  --mission "Coordinate a long-running autonomous project."
+
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  start-health-supervisor \
+  --restart-main-on-context-full \
+  --restart-main-when-missing
+```
+
+If the registered coordinator pane shows `Codex ran out of room in the model's context window`, or the registered coordinator target disappears while `--restart-main-when-missing` is enabled, the health supervisor calls `recover-coordinator`, refreshes `COORDINATOR_RECOVERY.md`, closes the old pane by default when present, and launches a new coordinator window. The recovered coordinator starts from the schedule, worker registry, progress/report files, jobs, peer messages, branch-manager summaries, and consultation context.
+
+Manual recovery:
+
+```bash
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  recover-coordinator --reason manual-restart --kill-old
+```
+
 Context budget defaults:
 
 - `progress` defaults to concise tails; use larger `--lines` only for diagnosis.
@@ -90,7 +123,7 @@ Long-running monitors:
 
 ```bash
 python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-supervisor --interval 300
-python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-health-supervisor --interval 30
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-health-supervisor --interval 30 --restart-main-on-context-full --restart-main-when-missing
 ```
 
 ## `codex_tmux_health_supervisor.py`
@@ -111,6 +144,8 @@ It watches the last lines of registered worker panes and optional extra panes fo
 
 It waits for a stability window and respects a cooldown before sending a recovery prompt. It auto-recovers only interactive Codex panes by default.
 
+It also monitors the registered main coordinator target unless `--no-coordinator` is passed. Context-window exhaustion is treated as fatal to the old coordinator thread, so auto-recovery requires `--restart-main-on-context-full` and launches a new coordinator via the manager's durable recovery prompt instead of pasting a continuation prompt into the exhausted pane. If the registered coordinator pane disappears outright, `--restart-main-when-missing` enables the same recovery path.
+
 Direct dry-run:
 
 ```bash
@@ -123,11 +158,19 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 Include a main coordinator pane when the coordinator itself runs inside tmux:
 
 ```bash
+tmux display-message -p '#S:#W.#{pane_index}'
+
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
+
 python "$MANAGER" \
   --state-dir .codex/tmux-workers \
   --session codex-workers \
   start-health-supervisor \
-  --watch-target main=<SESSION:WINDOW.PANE>
+  --restart-main-on-context-full \
+  --restart-main-when-missing
 ```
 
 Use `--observe-target name=<SESSION:WINDOW.PANE>` for panes that should be logged but never receive recovery prompts.
@@ -144,6 +187,7 @@ Important files:
 
 - `workers.json`: worker registry
 - `COORDINATOR_SCHEDULE.md`: user-auditable coordinator plan
+- `COORDINATOR_RECOVERY.md`: restart handoff for a recovered main coordinator
 - `schedule_events.jsonl`: coordinator and supervisor events
 - `peer_messages.jsonl`: manager-owned worker-to-worker message log
 - `progress/<worker>.md`: worker progress

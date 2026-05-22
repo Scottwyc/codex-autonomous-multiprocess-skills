@@ -57,7 +57,9 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - It must answer questions only; execution, recovery, launch, stop, and integration decisions stay with the coordinator or manager commands.
 10. Use the health supervisor for long-lived autonomous runs.
    - Start it with `start-health-supervisor`; it runs in `cw-health-supervisor`.
-   - It automatically monitors registered interactive workers and can also monitor the main coordinator pane through `--watch-target main=<tmux-target>`.
+   - It automatically monitors registered interactive workers and the registered main coordinator target unless disabled.
+   - When the main coordinator itself runs inside tmux, register it with `register-coordinator` before starting health supervision. This writes `COORDINATOR_RECOVERY.md`, records the coordinator target/model/cwd, and lets a later coordinator reconstruct the run from durable state.
+   - If the registered coordinator hits context-window exhaustion, start health supervision with `--restart-main-on-context-full`; if its tmux target may disappear outright, also use `--restart-main-when-missing`. The health supervisor calls `recover-coordinator`, optionally kills the old pane, and launches a new main coordinator that reads `COORDINATOR_RECOVERY.md`, `COORDINATOR_SCHEDULE.md`, workers, jobs, reports, and consultation context.
    - It auto-recovers only interactive Codex panes. Use `--observe-target` for panes that should be logged but never receive pasted recovery prompts.
    - It is for recoverable network/subprocess stalls, not semantic experiment failures, quota/auth failures, merge conflicts, or metric regressions.
 11. Use branch-manager workers for major branches.
@@ -92,6 +94,30 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --state-dir .codex/tmux-workers \
   --session codex-workers \
   start-consult --cwd "$PWD"
+```
+
+Register a tmux-hosted main coordinator for durable restart:
+
+```bash
+tmux display-message -p '#S:#W.#{pane_index}'
+python /home/wuyangcheng/.codex/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  register-coordinator \
+  --target <SESSION:WINDOW.PANE> \
+  --cwd "$PWD" \
+  --mission "Run the long autonomous evaluation line and coordinate worker reports."
+```
+
+Manual coordinator recovery from durable state:
+
+```bash
+python /home/wuyangcheng/.codex/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  recover-coordinator \
+  --reason manual-restart \
+  --kill-old
 ```
 
 Refresh the consultation context and notify the consultation window:
@@ -257,7 +283,12 @@ tmux display-message -p '#S:#W.#{pane_index}'
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   --session codex-workers \
-  start-health-supervisor --watch-target main=<SESSION:WINDOW.PANE>
+  register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
+
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  start-health-supervisor --restart-main-on-context-full --restart-main-when-missing
 ```
 
 Use `--dry-run` first if you want detection logs without pasted recovery prompts. Stop it with:

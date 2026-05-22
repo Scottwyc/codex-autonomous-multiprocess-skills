@@ -30,6 +30,7 @@
   |     |-- .codex/tmux-workers/
   |           |-- workers.json             -> worker registry
   |           |-- COORDINATOR_SCHEDULE.md  -> 主进程调度总览文档
+  |           |-- COORDINATOR_RECOVERY.md  -> 主进程重启接管 handoff
   |           |-- schedule_events.jsonl     -> 调度事件日志
   |           |-- peer_messages.jsonl       -> worker 横向消息日志
   |           |-- consult/
@@ -222,9 +223,32 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 ```text
 .codex/tmux-workers/COORDINATOR_SCHEDULE.md
+.codex/tmux-workers/COORDINATOR_RECOVERY.md
 ```
 
 这是主进程维护的调度总览文档，用户可以直接审查它来理解当前有哪些 worker、为什么启动、各自任务是什么、资源怎么分配、结果在哪里、下一步是什么。
+
+如果主 Codex 本身也运行在 tmux 中，建议注册主进程 target，方便意外挂掉或上下文耗尽后接管：
+
+```bash
+tmux display-message -p '#S:#W.#{pane_index}'
+
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  register-coordinator \
+  --target <SESSION:WINDOW.PANE> \
+  --cwd "$PWD" \
+  --mission "本轮长程自主任务目标"
+```
+
+注册后，manager 会在 `workers.json` 中记录主进程 target、cwd、模型、恢复窗口前缀和恢复参数，并维护：
+
+```text
+.codex/tmux-workers/COORDINATOR_RECOVERY.md
+```
+
+这个文件是新主进程的接管 handoff，包含当前目标、worker 总览、关键文件、最近调度事件、peer messages 和恢复后第一批检查命令。
 
 注意：普通执行 worker 使用 `workspace-write` sandbox 时，manager 会额外给 Codex CLI 传入：
 
@@ -573,6 +597,14 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - `ECONNRESET` / `ETIMEDOUT`
 - `502 Bad Gateway` / `503 Service Unavailable`
 
+此外，health supervisor 会把下面这种主进程不可原线程恢复的错误识别为“上下文耗尽”：
+
+```text
+Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.
+```
+
+这类错误不能靠给老 pane 继续发送 prompt 解决。正确策略是启动一个新的主进程，并让它从 durable state 接管。
+
 启动：
 
 ```bash
@@ -587,7 +619,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 默认行为：
 
-- 读取 `workers.json`，监控所有未停止的 worker。
+- 读取 `workers.json`，监控已注册主进程和所有未停止的 worker。
 - 只对 `mode=interactive` 的 Codex worker 自动粘贴恢复 prompt。
 - 对非 interactive worker 不自动恢复，避免把 prompt 当 shell 命令执行。
 - 只有错误稳定存在达到 `--stable-seconds`，且距离上次恢复超过 `--cooldown`，才会发送恢复指令。
@@ -595,7 +627,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - 写入 `status/health_supervisor.json` 和 `status/health_supervisor_state.json`。
 - 触发恢复时向 `schedule_events.jsonl` 追加 `health-recovery` 事件，并在 worker progress 文件里追加恢复记录。
 
-把主进程也纳入监控：
+把主进程也纳入监控并允许上下文耗尽后自动接管：
 
 ```bash
 # 在主 Codex 所在 tmux pane 里获取 target
@@ -604,8 +636,45 @@ tmux display-message -p '#S:#W.#{pane_index}'
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   --session codex-workers \
+  register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
+
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
   start-health-supervisor \
-  --watch-target main=<SESSION:WINDOW.PANE>
+  --restart-main-on-context-full \
+  --restart-main-when-missing
+```
+
+当注册主进程出现上下文耗尽，或注册 target 直接消失且启用了 `--restart-main-when-missing` 时，health supervisor 会：
+
+- 写入 `coordinator-context-recovery` 调度事件；
+- 调用 `recover-coordinator --reason context-window-exhausted --old-target <old> --kill-old`；
+- 先刷新 `COORDINATOR_RECOVERY.md`；
+- 关闭旧主进程 pane；
+- 新开 `cw-main-recovered-<timestamp>` 之类的 tmux window；
+- 启动新的 Codex 主进程，并粘贴恢复 prompt；
+- 新主进程读取 `COORDINATOR_RECOVERY.md`、`COORDINATOR_SCHEDULE.md`、`workers.json`、progress/report/jobs、branch-manager 汇总和 consult context 后继续调度。
+
+如果不希望自动关闭旧主进程：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  start-health-supervisor \
+  --restart-main-on-context-full \
+  --restart-main-when-missing \
+  --keep-old-main
+```
+
+手动接管：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  recover-coordinator --reason manual-restart --kill-old
 ```
 
 如果只想观察某个 pane，而绝不自动发送恢复 prompt：
@@ -637,6 +706,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 ```
 
 不要把 health supervisor 当成万能恢复器。它只处理网络断连、子进程退出等待超时、网关错误等“Codex TUI 卡在可恢复错误上”的情况。配额不足、认证错误、测试失败、代码冲突、指标退化、训练脚本真实崩溃，都应该交给主进程诊断，而不是自动续跑掩盖问题。
+
+主进程上下文耗尽的自动接管也不是“凭空恢复记忆”。它依赖此前持续维护的 durable artifacts：`COORDINATOR_SCHEDULE.md`、`COORDINATOR_RECOVERY.md`、worker progress/report、jobs registry、branch-manager 汇总、peer messages 和项目自己的跟进文档。如果主进程从未记录任务目标、worker 启动原因、资源分配和阶段性判断，新主进程只能恢复到这些文件实际保存的信息。
 
 ## 9. 后台 Job 注册
 

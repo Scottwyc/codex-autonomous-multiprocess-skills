@@ -12,13 +12,15 @@ This repository packages two Codex skills for long-running autonomous work with 
 
 - `tmux-codex-parallel-workers`
   - Launches, supervises, health-monitors, interrupts, resumes, and stops independent Codex CLI workers in tmux windows.
-  - Supports visible `autonomous-experiment` workers, subordinate `branch-manager` workers, manager-mediated `peer-send` worker messages, read-only consultation workers, coordinator scheduling docs, worker progress/report files, background job registries, optional git worktrees, and health recovery for transient Codex pane errors.
+  - Supports visible `autonomous-experiment` workers, subordinate `branch-manager` workers, manager-mediated `peer-send` worker messages, read-only consultation workers, coordinator scheduling docs, coordinator recovery handoffs, worker progress/report files, background job registries, optional git worktrees, health recovery for transient Codex pane errors, and main-coordinator restart after context-window exhaustion.
 
 Together, the two skills form an autonomous multiprocess management framework: a main Codex coordinator keeps final judgment and integration authority, while separate tmux Codex workers execute branch tasks in parallel.
 
 The framework also treats the coordinator context window as a limited resource. Worker progress, reports, schedule docs, consultation answers, and supervisor captures are designed to summarize first and point to files for long logs, full diffs, large tables, and tmux transcripts.
 
 For large experiment lines, the coordinator can delegate branch-level planning to a `branch-manager` worker. That branch manager can launch front-line `autonomous-experiment` children with `--parent-worker`, coordinate short `peer-send` messages between them, and report branch-level summaries back to the main coordinator.
+
+If the main coordinator itself is running inside tmux, it can be registered with `register-coordinator`. The health supervisor can then detect `Codex ran out of room in the model's context window` or a missing registered coordinator target, close the exhausted coordinator pane when present, launch a new coordinator window with `recover-coordinator`, and hand it `COORDINATOR_RECOVERY.md` plus the existing worker registry, schedule, progress/report files, jobs, peer messages, branch summaries, and consultation context.
 
 ## Documentation Maintenance / README 维护规则
 
@@ -60,6 +62,7 @@ README updates should name the feature, explain why it matters, and include a mi
   |     |-- .codex/tmux-workers/
   |           |-- workers.json             -> worker registry
   |           |-- COORDINATOR_SCHEDULE.md  -> 主进程调度总览文档
+  |           |-- COORDINATOR_RECOVERY.md  -> 主进程重启接管 handoff
   |           |-- schedule_events.jsonl     -> 调度事件日志
   |           |-- peer_messages.jsonl       -> worker 横向消息日志
   |           |-- consult/
@@ -252,9 +255,26 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 ```text
 .codex/tmux-workers/COORDINATOR_SCHEDULE.md
+.codex/tmux-workers/COORDINATOR_RECOVERY.md
 ```
 
 这是主进程维护的调度总览文档，用户可以直接审查它来理解当前有哪些 worker、为什么启动、各自任务是什么、资源怎么分配、结果在哪里、下一步是什么。
+
+如果主 Codex 本身也运行在 tmux 中，建议注册主进程 target，方便意外挂掉或上下文耗尽后由新主进程接管：
+
+```bash
+tmux display-message -p '#S:#W.#{pane_index}'
+
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  register-coordinator \
+  --target <SESSION:WINDOW.PANE> \
+  --cwd "$PWD" \
+  --mission "本轮长程自主任务目标"
+```
+
+注册后，manager 会在 `workers.json` 中记录主进程 target、cwd、模型、恢复窗口前缀和恢复参数，并持续维护 `COORDINATOR_RECOVERY.md`。这个 handoff 文件是新主进程的接管入口，包含当前目标、worker 总览、关键文件、最近调度事件、peer messages 和恢复后的第一批检查命令。
 
 注意：普通执行 worker 使用 `workspace-write` sandbox 时，manager 会额外给 Codex CLI 传入：
 
@@ -603,6 +623,14 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - `ECONNRESET` / `ETIMEDOUT`
 - `502 Bad Gateway` / `503 Service Unavailable`
 
+此外，health supervisor 会把下面这种主进程不可原线程恢复的错误识别为“上下文耗尽”：
+
+```text
+Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.
+```
+
+这类错误不能靠给老 pane 继续发送 prompt 解决。正确策略是启动一个新的主进程，并让它从 durable state 接管。
+
 启动：
 
 ```bash
@@ -617,7 +645,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 默认行为：
 
-- 读取 `workers.json`，监控所有未停止的 worker。
+- 读取 `workers.json`，监控已注册主进程和所有未停止的 worker。
 - 只对 `mode=interactive` 的 Codex worker 自动粘贴恢复 prompt。
 - 对非 interactive worker 不自动恢复，避免把 prompt 当 shell 命令执行。
 - 只有错误稳定存在达到 `--stable-seconds`，且距离上次恢复超过 `--cooldown`，才会发送恢复指令。
@@ -625,7 +653,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - 写入 `status/health_supervisor.json` 和 `status/health_supervisor_state.json`。
 - 触发恢复时向 `schedule_events.jsonl` 追加 `health-recovery` 事件，并在 worker progress 文件里追加恢复记录。
 
-把主进程也纳入监控：
+把主进程也纳入监控并允许上下文耗尽后自动接管：
 
 ```bash
 # 在主 Codex 所在 tmux pane 里获取 target
@@ -634,8 +662,37 @@ tmux display-message -p '#S:#W.#{pane_index}'
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   --session codex-workers \
+  register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
+
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
   start-health-supervisor \
-  --watch-target main=<SESSION:WINDOW.PANE>
+  --restart-main-on-context-full \
+  --restart-main-when-missing
+```
+
+当注册主进程出现上下文耗尽，或注册 target 直接消失且启用了 `--restart-main-when-missing` 时，health supervisor 会写入恢复调度事件，调用 `recover-coordinator`，刷新 `COORDINATOR_RECOVERY.md`，关闭旧主进程 pane，新开 `cw-main-recovered-<timestamp>` 之类的 tmux window，并启动新的 Codex 主进程继续调度。
+
+如果不希望自动关闭旧主进程：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  start-health-supervisor \
+  --restart-main-on-context-full \
+  --restart-main-when-missing \
+  --keep-old-main
+```
+
+手动接管：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  recover-coordinator --reason manual-restart --kill-old
 ```
 
 如果只想观察某个 pane，而绝不自动发送恢复 prompt：
@@ -667,6 +724,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 ```
 
 不要把 health supervisor 当成万能恢复器。它只处理网络断连、子进程退出等待超时、网关错误等“Codex TUI 卡在可恢复错误上”的情况。配额不足、认证错误、测试失败、代码冲突、指标退化、训练脚本真实崩溃，都应该交给主进程诊断，而不是自动续跑掩盖问题。
+
+主进程上下文耗尽的自动接管也不是“凭空恢复记忆”。它依赖此前持续维护的 durable artifacts：`COORDINATOR_SCHEDULE.md`、`COORDINATOR_RECOVERY.md`、worker progress/report、jobs registry、branch-manager 汇总、peer messages 和项目自己的跟进文档。如果主进程从未记录任务目标、worker 启动原因、资源分配和阶段性判断，新主进程只能恢复到这些文件实际保存的信息。
 
 ### 9. 后台 Job 注册
 
@@ -876,7 +935,7 @@ The Python scripts under `tmux-codex-parallel-workers/scripts/` are not optional
 
 ### `codex_tmux_manager.py`
 
-Main tmux Codex worker manager. It provides commands to initialize state, launch workers, send or interrupt prompts, start consultation windows, start normal and health supervisors, track background jobs, resume workers, collect reports, and maintain the coordinator schedule document.
+Main tmux Codex worker manager. It provides commands to initialize state, register/recover the main coordinator, launch workers, send or interrupt prompts, start consultation windows, start normal and health supervisors, track background jobs, resume workers, collect reports, and maintain the coordinator schedule and recovery handoff documents.
 
 Typical command:
 
@@ -884,6 +943,7 @@ Typical command:
 MANAGER="${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py"
 
 python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers init --cwd "$PWD"
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
 python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers launch worker-a --cwd "$PWD" --task "Do one bounded branch task and report back."
 ```
 
@@ -908,7 +968,7 @@ python "$MANAGER" --state-dir .codex/tmux-workers peer-send child-a child-b \
 
 ### `codex_tmux_health_supervisor.py`
 
-Low-level health supervisor used by the manager's `start-health-supervisor` command. It monitors tmux Codex panes for recoverable transport/subprocess failures and sends a bounded continuation prompt when a pane is stuck.
+Low-level health supervisor used by the manager's `start-health-supervisor` command. It monitors tmux Codex panes for recoverable transport/subprocess failures and sends a bounded continuation prompt when a pane is stuck. When the main coordinator is registered and `--restart-main-on-context-full` is enabled, it treats context-window exhaustion as fatal to the old thread and launches a recovered coordinator from `COORDINATOR_RECOVERY.md`.
 
 Typical direct dry-run:
 
@@ -993,7 +1053,7 @@ For long-lived sessions, also start the two monitor layers:
 
 ```bash
 python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-supervisor --interval 300
-python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-health-supervisor --interval 30
+python "$MANAGER" --state-dir .codex/tmux-workers --session codex-workers start-health-supervisor --interval 30 --restart-main-on-context-full --restart-main-when-missing
 ```
 
 Attach to the tmux session:
@@ -1009,8 +1069,9 @@ tmux attach -t codex-workers
 - Branch managers may coordinate child workers inside their assigned scope, but final merge, promotion, cross-branch resource decisions, and user-facing conclusions remain coordinator-owned unless explicitly delegated.
 - Worker-to-worker communication must go through `peer-send`; peer messages are evidence/dependency notes, not authority to change scope or resources.
 - The framework records worker state under `.codex/tmux-workers/` so users can audit launches, inbox messages, progress, reports, captures, jobs, and scheduling decisions.
+- Register tmux-hosted main coordinators with `register-coordinator` when long autonomous recovery matters. A recovered coordinator must start from `COORDINATOR_RECOVERY.md` and `COORDINATOR_SCHEDULE.md`, not from stale memory.
 - Default coordinator checks should start from `schedule`, `progress --lines 40`, `jobs`, and `collect --lines 30`; larger captures or raw artifacts are for concrete diagnosis or final review.
-- The health supervisor only targets transient Codex pane stalls such as network disconnects or child-process timeout errors. It is not a replacement for debugging quota/auth failures, failed tests, merge conflicts, or bad metrics.
+- The health supervisor targets transient Codex pane stalls and, when explicitly enabled, registered-coordinator context exhaustion. It is not a replacement for debugging quota/auth failures, failed tests, merge conflicts, bad metrics, or missing durable project documentation.
 
 ## License
 
