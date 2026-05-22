@@ -11,6 +11,8 @@ Responsibilities:
 - initialize a project-local worker state directory
 - launch `codex exec` or interactive Codex workers in tmux windows
 - support visible `autonomous-experiment` workers
+- support subordinate `branch-manager` workers for major branches
+- write manager-mediated `peer-send` messages between workers
 - write worker prompts, progress files, reports, status files, logs, inbox messages, and job registries
 - maintain `COORDINATOR_SCHEDULE.md`
 - start read-only consultation workers
@@ -38,6 +40,34 @@ python "$MANAGER" \
   --task "Inspect logs and write a concise report."
 ```
 
+Branch manager and peer communication:
+
+```bash
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  launch branch-mgr \
+  --cwd "$PWD" \
+  --worker-kind branch-manager \
+  --manager-scope "Coordinate one major branch and summarize child worker results." \
+  --task "Plan child workers, launch them with --parent-worker branch-mgr, and maintain a branch-level report."
+
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  launch child-a \
+  --cwd "$PWD" \
+  --parent-worker branch-mgr \
+  --worker-kind autonomous-experiment \
+  --task "Run one bounded child experiment and report evidence paths."
+
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  peer-send child-a child-b \
+  --message "Child A produced artifact path results/child-a/metrics.json for Child B to inspect." \
+  --notify
+```
+
 Common commands:
 
 ```bash
@@ -46,6 +76,7 @@ python "$MANAGER" --state-dir .codex/tmux-workers progress audit-a --lines 40
 python "$MANAGER" --state-dir .codex/tmux-workers capture audit-a --lines 80
 python "$MANAGER" --state-dir .codex/tmux-workers send audit-a "Continue with the summary only."
 python "$MANAGER" --state-dir .codex/tmux-workers interrupt-send audit-a "Stop current expansion and report current state."
+python "$MANAGER" --state-dir .codex/tmux-workers peer-send audit-a audit-b --message "Use artifact path results/audit-a/summary.md."
 python "$MANAGER" --state-dir .codex/tmux-workers collect --lines 30
 ```
 
@@ -114,6 +145,7 @@ Important files:
 - `workers.json`: worker registry
 - `COORDINATOR_SCHEDULE.md`: user-auditable coordinator plan
 - `schedule_events.jsonl`: coordinator and supervisor events
+- `peer_messages.jsonl`: manager-owned worker-to-worker message log
 - `progress/<worker>.md`: worker progress
 - `reports/<worker>.md`: worker final or intermediate report
 - `inbox/<worker>/`: auditable coordinator messages

@@ -8,6 +8,8 @@
 
 - 主进程长期在线，负责拆解任务、资源规划、最终判断和结果合并。
 - 子 Codex 在独立 tmux window 中运行，负责支线执行、实验巡检、报告草拟、代码修改或数据分析。
+- 对重大实验分支，主进程可以启动下属 `branch-manager` worker，由它继续调度一线 `autonomous-experiment` worker。
+- 一线 worker 之间可以通过 manager 记录的 `peer-send` 消息传递证据、阻塞点和 artifact 路径，但不能私自改变任务边界或资源分配。
 - 所有 worker 都有可恢复的本地状态：任务计划、进展、报告、日志、inbox、status、后台 job registry。
 - 主进程可以定期监督、发送指令、暂停/恢复 worker，并在最后收集所有证据。
 
@@ -29,6 +31,7 @@
   |           |-- workers.json             -> worker registry
   |           |-- COORDINATOR_SCHEDULE.md  -> 主进程调度总览文档
   |           |-- schedule_events.jsonl     -> 调度事件日志
+  |           |-- peer_messages.jsonl       -> worker 横向消息日志
   |           |-- consult/
   |           |     |-- CONSULT_CONTEXT.md   -> 用户咨询窗口上下文快照
   |           |     |-- consult.prompt.md    -> 咨询 worker 启动规则
@@ -48,6 +51,22 @@
 ```
 
 主进程只把适合并行的支线拆给 worker。任何最终合并、实验结论、代码接受、指标判断，都必须由主进程复核。
+
+对于复杂实验线，推荐层级化：
+
+```text
+主 Codex / Coordinator
+  |
+  |-- branch-manager worker: 重大实验分支 A
+  |     |-- autonomous-experiment worker A1
+  |     |-- autonomous-experiment worker A2
+  |     |-- peer-send: A1 -> A2 的短证据/依赖消息
+  |
+  |-- branch-manager worker: 重大实验分支 B
+        |-- autonomous-experiment worker B1
+```
+
+主进程主要审查 branch manager 的分支级汇总；只有失败、合并、资源冲突、用户审计或最终结论需要时，才深入一线 worker 的完整日志和产物。
 
 ## 2.1 默认模型策略
 
@@ -160,6 +179,31 @@ raw logs / full tables / full diffs / tmux transcript
   -> 主进程最终判断
 ```
 
+## 2.4 下属管理 worker 与横向通信
+
+`branch-manager` worker 是主进程下属的分支管理者，适合用于重大实验分支。主进程只给它明确的分支目标、资源边界、写入范围和预期分支报告；它负责继续拆解一线任务、启动子 worker、协调横向消息、汇总分支结果。
+
+使用边界：
+
+- 主进程负责全局目标、跨分支资源、最终合并、最终指标判断和对用户汇报。
+- branch manager 负责单个重大分支内部的任务拆分、子 worker 调度、子结果初步整合和分支级报告。
+- 一线 autonomous-experiment worker 负责具体实验、巡检、诊断、日志/指标产物和自己的 progress/report。
+- worker 横向通信必须通过 `peer-send`，写入 `peer_messages.jsonl` 和目标 worker inbox，不能私下改调度状态。
+
+`peer-send` 适合传递：
+
+- 某个实验产物路径
+- 某个配置/指标/错误片段
+- “请在下一次安全 checkpoint 检查这个 artifact”
+- 依赖关系或阻塞点
+
+`peer-send` 不适合传递：
+
+- 改变另一个 worker 的写入范围
+- 改变 GPU/端口/输出目录资源分配
+- 宣布最终结论或通过 gate
+- 粘贴长日志、完整 diff、大表格
+
 ## 3. 基本初始化
 
 在项目根目录执行：
@@ -247,9 +291,10 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - 当前总目标
 - 用户审查入口命令
 - worker 总表
-- 每个 worker 的状态、任务、模型、reasoning effort、资源、owned paths、tmux 位置
+- 每个 worker 的状态、任务、类型、上级 worker、模型、reasoning effort、资源、owned paths、tmux 位置
 - workplan/progress/report/inbox/jobs/status 文件路径
 - 后台 job 当前 PID 状态
+- worker 横向消息摘录
 - progress/report 最新摘录
 - git worktree 和 diff 摘要
 - 调度事件日志
@@ -345,6 +390,41 @@ tmux attach -t codex-workers
 
 然后切换到 `cw-exp-a` 这样的 worker window。
 
+### 4.4 branch-manager worker
+
+当一个重大实验分支内部还需要多个一线 worker 并行推进时，主进程优先启动一个 `branch-manager`：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  launch moe-branch-manager \
+  --cwd "$PWD" \
+  --worker-kind branch-manager \
+  --manager-scope "协调 MoE 分支；可在 results/moe-branch/ 和 docs/moe-branch/ 下启动子 worker 并汇总结果。" \
+  --owned-path "results/moe-branch/" \
+  --owned-path "docs/moe-branch/" \
+  --resource "gpu:0-1" \
+  --write-scope "规划并协调 MoE 分支的一线 autonomous-experiment worker，向主进程提交分支级汇总。" \
+  --task "制定分支计划，启动带 --parent-worker moe-branch-manager 的子实验 worker，协调 peer-send 消息，并维护分支级 report。"
+```
+
+branch manager 再启动一线 worker：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  launch moe-k-sweep \
+  --parent-worker moe-branch-manager \
+  --worker-kind autonomous-experiment \
+  --owned-path "results/moe-branch/k-sweep/" \
+  --resource "gpu:0" \
+  --task "运行 K sweep 子实验，更新 progress，并把指标和 artifact 路径报告给 branch manager。"
+```
+
+branch manager 的职责不是替代主进程做最终判断，而是减少主进程直接跟进一线 worker 的压力。主进程通常先看 branch manager 的 report，再决定是否深入检查子 worker。
+
 ## 5. Git Worktree 隔离
 
 多个 worker 同时改代码时，推荐使用独立 git worktree：
@@ -414,6 +494,27 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 ```
 
 注意按键顺序：`interrupt-send` 会先通过 tmux paste-buffer 粘贴并回车提交新消息，再发送 `Escape`，让 Codex TUI 从当前运行切到刚提交的新指令。不要手工改成“先 Escape 再发消息”，否则 busy worker 容易只是取消当前输入或把新消息排队到下一次工具调用之后。
+
+### 6.4 worker 横向消息
+
+一线 worker 或 branch manager 需要把短证据发给另一个 worker 时，使用 `peer-send`：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  peer-send moe-k-sweep moe-router-audit \
+  --message "K sweep 产物在 results/moe-branch/k-sweep/best_config.yaml，请下一轮 router audit 使用。" \
+  --notify
+```
+
+`peer-send` 会：
+
+- 写入目标 worker 的 inbox；
+- 追加 `peer_messages.jsonl`；
+- 在来源和目标 progress 中追加短记录；
+- 如果加 `--notify`，向目标 tmux pane 粘贴一条“读取 inbox”的短通知。
+
+不要用 `peer-send` 传长日志或完整 diff。涉及资源、scope、最终结论的变化，必须由 branch manager 或主进程通过 `schedule-note` 记录。
 
 ## 7. Supervisor
 
@@ -673,14 +774,17 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
    - 只读审计 -> exec worker
    - 长训练/长评估 -> interactive worker + supervisor
    - 并行代码修改 -> --git-worktree worker
-5. 每个 worker 声明 owned-path 和 resource。
-6. supervisor 持续 capture、query、stalled 检测。
-7. worker 启动后台任务时 job-add 注册 PID。
-8. 主进程定期 list/progress --lines 40/jobs/collect --lines 30，必要时再短 capture。
-9. 主进程用 schedule-note 记录调度判断和下一步 checkpoint，并用 consult-sync 更新咨询窗口。
-10. worker 完成后，主进程 review report、diff、logs、metrics。
-11. 主进程运行必要测试和最终评估。
-12. 主进程决定合并、重跑、恢复或停止，并把决策写入调度文档。
+   - 重大实验分支 -> branch-manager worker
+5. branch-manager 在授权 scope 内启动带 --parent-worker 的一线 autonomous-experiment worker。
+6. 一线 worker 之间只用 peer-send 传递短证据/依赖消息。
+7. 每个 worker 声明 owned-path 和 resource。
+8. supervisor 持续 capture、query、stalled 检测。
+9. worker 启动后台任务时 job-add 注册 PID。
+10. 主进程定期 list/progress --lines 40/jobs/collect --lines 30，优先看 branch-manager 汇总，必要时再短 capture。
+11. 主进程用 schedule-note 记录调度判断和下一步 checkpoint，并用 consult-sync 更新咨询窗口。
+12. worker 完成后，主进程 review report、diff、logs、metrics。
+13. 主进程运行必要测试和最终评估。
+14. 主进程决定合并、重跑、恢复或停止，并把决策写入调度文档。
 ```
 
 ## 14. 设计边界
@@ -689,6 +793,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 - tmux 多窗口 Codex worker
 - exec 和 interactive 两种 worker
+- branch-manager 分支管理 worker
+- peer-send worker 横向消息
 - paste-buffer 通信
 - inbox 指令队列
 - progress/report/workplan/status 持久化

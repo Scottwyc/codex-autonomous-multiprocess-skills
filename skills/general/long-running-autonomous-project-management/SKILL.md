@@ -1,6 +1,6 @@
 ---
 name: long-running-autonomous-project-management
-description: 'Use when a project needs long-running autonomous follow-up: keep the current session alive, launch and monitor experiments or jobs over time, balance GPU/CPU resources, update project docs continuously, default to tmux-launched Codex worker parallelism for non-blocking branch tasks unless disabled or unsuitable, and derive project-specific skills from this template when a specialized workflow is needed.'
+description: 'Use when a project needs long-running autonomous follow-up: keep the current session alive, launch and monitor experiments or jobs over time, balance GPU/CPU resources, update project docs continuously, default to tmux-launched Codex worker parallelism for non-blocking branch tasks, use branch-manager worker hierarchies for major experimental branches unless disabled or unsuitable, and derive project-specific skills from this template when a specialized workflow is needed.'
 ---
 
 # Long-Running Autonomous Project Management
@@ -34,8 +34,9 @@ After a target is defined:
 4. Prefer parallelism when it is useful.
    - Run disjoint experiments in parallel when they answer different questions.
    - Use spare GPU or CPU capacity for monitoring, evaluation, data checks, plotting, or documentation.
-   - In autonomous follow-up mode, use `tmux-codex-parallel-workers` by default for independent non-blocking branches while the main session remains coordinator.
+   - In autonomous follow-up mode, use `tmux-codex-parallel-workers` by default to organize and schedule workers for independent non-blocking branches while the main session remains coordinator.
    - For actual experiment branches, prefer visible `--worker-kind autonomous-experiment` workers by default. The coordinator should assign resources and scope, then monitor and integrate, rather than duplicating the worker's command-by-command execution.
+   - For major experimental branches, launch a subordinate `--worker-kind branch-manager` worker. Give it the branch target and resource envelope, let it coordinate child `autonomous-experiment` workers with `--parent-worker`, and have the main coordinator review the branch-manager's summary instead of tracking every child step directly.
    - Protect the main session's context window: workers should report summaries, evidence paths, and next actions; raw logs, full diffs, long tables, and tmux transcripts stay in files unless diagnosis requires loading them.
    - Do not launch tmux workers when the user explicitly disables worker parallelism, when `tmux` or `codex` is unavailable, when quota/cost constraints make it inappropriate, or when the next work is tightly coupled and better handled by the coordinator.
 5. Keep a monitoring cadence that matches runtime.
@@ -115,36 +116,49 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - In this environment, launch/resume project-local experiment workers with YOLO-level permissions (`sandbox=danger-full-access`, `approval=never`) unless the user explicitly asks for a restricted worker. This avoids the read-only `.codex` mount and blocked SSH failure mode seen under `workspace-write`.
    - Even under YOLO permissions, worker prompts must avoid destructive filesystem operations such as `rm` unless the coordinator explicitly authorizes a narrowly scoped cleanup.
    - Prefer keeping visible worker panes on the local/nature host. Workers should operate other machines through SSH from the local pane, so the user can monitor, interrupt, and clean all worker windows in one local tmux session.
-5. Assign every worker:
+5. For major branches, launch a subordinate branch manager before launching many front-line workers directly.
+   - Use `tmux-codex-parallel-workers launch <branch> --worker-kind branch-manager`.
+   - Give it a concrete branch mission, `--manager-scope`, resources, owned output roots, and the expected branch-level report.
+   - The branch manager may launch child workers with `--parent-worker <branch-manager>`, usually `--worker-kind autonomous-experiment`.
+   - The branch manager may use `peer-send` to allow front-line workers to exchange short evidence, blockers, and artifact paths.
+   - The main coordinator should inspect the branch manager's progress/report and schedule notes first, then drill into child workers only when there is a failure, integration decision, or user audit request.
+6. Assign every worker:
    - objective
    - working directory
    - read/write scope
    - GPU/CPU/port/output ownership when relevant
    - expected completion report
-6. Maintain `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` as the user-auditable control document for starts, stops, task assignment, scheduling decisions, and results.
-7. Keep `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` fresh so the consultation worker can answer user questions without interrupting the coordinator.
-8. Keep the coordinator on the critical path while workers run, and keep the coordinator context lean:
+7. Maintain `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` as the user-auditable control document for starts, stops, task assignment, branch-manager hierarchy, peer messages, scheduling decisions, and results.
+8. Keep `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` fresh so the consultation worker can answer user questions without interrupting the coordinator.
+9. Keep the coordinator on the critical path while workers run, and keep the coordinator context lean:
    - prefer `schedule`, `progress --lines 40`, `jobs`, and `collect --lines 30`;
    - use `capture --lines 80/120` for recent pane state, not full scrollback;
    - ask workers to write long evidence to report/artifact/log files and provide paths plus short summaries;
    - keep consultation-window answers compact and evidence-linked.
-9. At each monitoring checkpoint, inspect worker summaries first, inspect changed files or longer captures only when needed, integrate safe results, refresh the consultation context, and record the decision in the follow-up file.
-10. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux windows accumulate.
-11. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
-12. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
-13. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. Add the main coordinator pane with `--watch-target main=<SESSION:WINDOW.PANE>` only when the main Codex itself is running inside tmux and should be auto-recovered.
-14. Use the coordinator as the control plane:
+10. At each monitoring checkpoint, inspect branch-manager summaries and worker summaries first, inspect changed files or longer captures only when needed, integrate safe results, refresh the consultation context, and record the decision in the follow-up file.
+11. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux windows accumulate.
+12. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
+13. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
+14. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. Add the main coordinator pane with `--watch-target main=<SESSION:WINDOW.PANE>` only when the main Codex itself is running inside tmux and should be auto-recovered.
+15. Use the coordinator as the control plane:
    - decide which branch is worth running;
    - cap GPU/CPU/IO usage;
+   - choose whether to launch direct front-line workers or a branch-manager hierarchy;
    - issue timely `send` / `interrupt-send` instructions when a worker needs a protocol correction or a new checkpoint;
    - collect reports and reconcile results;
    - update durable docs and promotion decisions.
-15. Use workers as execution planes:
+16. Use branch managers as branch control planes:
+   - decompose one major branch into child workers;
+   - coordinate front-line worker peer messages and resource use inside the assigned scope;
+   - maintain branch-level progress/report summaries;
+   - escalate final decisions and cross-branch conflicts to the main coordinator.
+17. Use front-line workers as execution planes:
    - launch/monitor assigned experiments;
    - run bounded audits or sweeps inside their write scope;
    - keep progress/report files current;
+   - use `peer-send` only for short factual messages and evidence paths;
    - register background jobs when supported.
-16. Current job registration caveat: `job-add` tracks local PIDs directly. For remote tmux jobs on another host, workers must additionally record the host, tmux session, GPU, command, log path, result/checkpoint roots, and liveness/polling command in progress/report/schedule. Treat `pid=0` job entries only as remote markers unless the project-specific manager has first-class remote liveness checks.
+18. Current job registration caveat: `job-add` tracks local PIDs directly. For remote tmux jobs on another host, workers must additionally record the host, tmux session, GPU, command, log path, result/checkpoint roots, and liveness/polling command in progress/report/schedule. Treat `pid=0` job entries only as remote markers unless the project-specific manager has first-class remote liveness checks.
 
 ### 5. Failure Handling
 

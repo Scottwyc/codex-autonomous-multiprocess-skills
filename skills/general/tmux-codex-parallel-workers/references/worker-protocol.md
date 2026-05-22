@@ -19,6 +19,8 @@ Include:
 - background job registry path
 - git worktree branch/path when isolation is enabled
 - model and reasoning effort
+- parent worker, if managed by a branch-manager worker
+- manager scope, if the worker is a branch manager
 
 ## Prompt Template
 
@@ -39,6 +41,8 @@ Job registry: <state-dir>/jobs/<name>.json
 Git worktree: <path and branch, when enabled>
 Model: <model, default gpt-5.5>
 Reasoning effort: <effort, default xhigh>
+Parent worker: <main-coordinator or branch-manager name>
+Manager scope: <branch manager authority/resource/write envelope, when applicable>
 Coordinator context budget: keep coordinator-facing updates short; write long logs, diffs, tables, and transcripts to artifact/report files and cite paths with a short summary.
 ```
 
@@ -57,6 +61,7 @@ Coordinator context budget: keep coordinator-facing updates short; write long lo
 - Prefer `codex exec` workers for unattended one-shot tasks.
 - Use interactive workers when the coordinator expects follow-up input or when the user should be able to watch the Codex worker's planning, inspections, command launches, and recovery decisions in tmux.
 - Use `--worker-kind autonomous-experiment` for visible, independently progressing experiment branches.
+- Use `--worker-kind branch-manager` for major experiment branches whose internal coordination would overload the main coordinator. Branch managers may launch child workers with `--parent-worker <branch-manager>`.
 - Capture output before making decisions from a worker's result.
 - Record worker launches and decisions in the project status document for long-running autonomous work.
 - Send multiline prompts through paste-buffer, not raw `send-keys`.
@@ -65,6 +70,7 @@ Coordinator context budget: keep coordinator-facing updates short; write long lo
 - If a supervisor asks a progress question, it must send a continue prompt after capturing the answer.
 - Treat `workers.json` and `status/<worker>.json` as the manager-owned registry; workers may read them but should not edit them.
 - Treat `COORDINATOR_SCHEDULE.md`, `schedule_events.jsonl`, and `consult/` as manager-owned artifacts; workers may read them, but should update state through progress/report files or manager commands.
+- Treat `peer_messages.jsonl` as the manager-owned worker-to-worker communication log. Workers may send through `peer-send`, but should not edit it manually.
 - Register long-running background processes with `job-add` immediately after launch.
 - When running inside a git worktree, keep changes in that worktree and report the diff summary before completion.
 - The coordinator should use `schedule-note` for non-obvious decisions: launching workers, changing resources, accepting/rejecting results, recovering stalled work, or stopping jobs.
@@ -73,6 +79,48 @@ Coordinator context budget: keep coordinator-facing updates short; write long lo
 - The supervisor may query interactive workers only when explicitly enabled; by default those queries are restricted to workers already marked `stalled`.
 - For long-lived autonomous runs, start `start-health-supervisor` as a separate tmux health loop. It watches interactive Codex panes for recoverable network/subprocess errors and resumes only after stability/cooldown checks.
 - Add the main coordinator pane with `--watch-target main=<SESSION:WINDOW.PANE>` only when the coordinator is itself running inside tmux and the user wants it auto-recovered. Use `--observe-target` for panes that must never receive recovery prompts.
+
+## Branch Manager Worker Rules
+
+A branch-manager worker is a subordinate management worker for one major branch. It reduces main-coordinator load by managing a small tree of front-line workers.
+
+It may:
+
+- decompose the branch goal into bounded child worker tasks
+- launch child workers with `--parent-worker <branch-manager>` and explicit `--owned-path`, `--resource`, write scope, and expected report
+- coordinate child progress through `send`, `interrupt-send`, `peer-send`, `jobs`, `progress`, `collect`, and `schedule-note`
+- maintain a branch-level progress/report file summarizing child workers, resources, current results, blockers, and branch next actions
+
+It must:
+
+- keep child workers inside the manager scope and resource envelope assigned by the main coordinator
+- prefer `--worker-kind autonomous-experiment` for real experiment children
+- record non-obvious branch decisions through `schedule-note`
+- summarize child output with evidence paths instead of pasting child logs into the main coordinator context
+- escalate cross-branch resource conflicts, final promotion, merge, or user-facing conclusions back to the main coordinator unless explicitly delegated
+
+## Peer Communication Rules
+
+Front-line workers may communicate only through manager-mediated peer messages:
+
+```bash
+python <manager> --state-dir <state-dir> peer-send <source-worker> <target-worker> --message "<short factual message>" --notify
+```
+
+Use peer messages for:
+
+- evidence paths
+- dependency notices
+- short blockers
+- metric snippets
+- requests to inspect a shared artifact
+
+Do not use peer messages to:
+
+- change another worker's write scope, resource allocation, or experiment gate
+- make final branch or cross-branch decisions
+- paste long logs, full diffs, or large tables
+- bypass the branch manager or main coordinator for decisions that affect scheduling
 
 ## Consultation Worker Rules
 

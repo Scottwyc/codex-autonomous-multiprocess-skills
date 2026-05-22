@@ -1,6 +1,6 @@
 ---
 name: tmux-codex-parallel-workers
-description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in tmux windows for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-window autonomous workers, a stronger autonomous parallel mode, a read-only user consultation window, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
+description: Launch, supervise, health-monitor, and stop independent Codex CLI worker processes in tmux windows for parallel branch tasks. Use when the user wants tmux-managed Codex workers, background Codex sessions, multi-window autonomous workers, visible autonomous experiment workers, subordinate branch-manager workers, manager-mediated worker-to-worker communication, a read-only user consultation window, auto-recovery from Codex tmux pane errors, or when long-running autonomous project management defaults to Codex worker parallelism.
 ---
 
 # Tmux Codex Parallel Workers
@@ -10,6 +10,8 @@ description: Launch, supervise, health-monitor, and stop independent Codex CLI w
 Use this skill to run separate Codex CLI processes in tmux windows while the current agent remains the coordinator. It is for parallelism in long-running autonomous work: independent code exploration, experiment monitoring, report drafting, log analysis, user consultation, or bounded code changes with disjoint ownership.
 
 Prefer built-in subagents when structured result return is enough and persistence is unnecessary. Prefer this tmux mode when long-running autonomous project management is active by default, or when the user wants real OS-level Codex processes, persistent tmux windows, manual attach/capture, user consultation, or long-running background workers.
+
+For substantial experimental branches, the coordinator may launch a subordinate `branch-manager` worker. The main coordinator gives that worker the branch goal and resource envelope, then the branch manager launches and coordinates front-line `autonomous-experiment` child workers. This reduces main-context load while preserving coordinator-owned final review and user-facing decisions.
 
 This skill follows the same operational principle as the Qwen long-mode tooling: reliable paste-buffer prompt delivery, durable progress files, explicit work plans/reports, and supervisor prompts that return the worker to its previous task after a status check.
 
@@ -58,6 +60,15 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - It automatically monitors registered interactive workers and can also monitor the main coordinator pane through `--watch-target main=<tmux-target>`.
    - It auto-recovers only interactive Codex panes. Use `--observe-target` for panes that should be logged but never receive pasted recovery prompts.
    - It is for recoverable network/subprocess stalls, not semantic experiment failures, quota/auth failures, merge conflicts, or metric regressions.
+11. Use branch-manager workers for major branches.
+   - Start them with `launch <name> --worker-kind branch-manager`; they default to visible interactive mode and supervisor like autonomous experiment workers.
+   - Give each branch manager a clear mission, `--manager-scope`, resource envelope, and allowed write/output roots.
+   - Branch managers may launch child workers with `--parent-worker <branch-manager>` and coordinate their reports, jobs, and peer messages.
+   - Branch managers produce branch-level progress/report summaries for the main coordinator; they do not own final merge, promotion, cross-branch resource decisions, or user-facing conclusions unless explicitly delegated.
+12. Allow front-line worker communication only through manager-mediated messages.
+   - Use `peer-send <source> <target> --message ...` or `--message-file ...`.
+   - Peer messages are for short factual evidence, blockers, dependency notices, and artifact paths.
+   - Peer messages must not silently change another worker's scope, resources, experiment gate, or final decision authority.
 
 ## Manager Script
 
@@ -157,12 +168,54 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 `autonomous-experiment` defaults to `interactive` mode and starts the supervisor unless `--no-start-supervisor` is passed. Attach with `tmux attach -t codex-workers`, then switch to the worker window such as `cw-exp-a` to watch the Codex worker's actual planning, inspections, commands, and recovery decisions.
 
+Launch a subordinate branch manager for a major experiment line:
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  launch moe-branch-manager \
+  --cwd "$PWD" \
+  --worker-kind branch-manager \
+  --manager-scope "Coordinate MoE ablation branch; may launch child workers under results/moe-branch/ and docs/moe-branch/" \
+  --owned-path "results/moe-branch/" \
+  --owned-path "docs/moe-branch/" \
+  --resource "gpu:0-1" \
+  --write-scope "Plan and coordinate child autonomous-experiment workers for the MoE branch; summarize branch results for the main coordinator." \
+  --task "Create a branch plan, launch bounded child experiment workers with --parent-worker moe-branch-manager, coordinate peer messages, and maintain a branch-level report."
+```
+
+A branch manager can then launch child workers with `--parent-worker`:
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  --session codex-workers \
+  launch moe-k-sweep \
+  --parent-worker moe-branch-manager \
+  --worker-kind autonomous-experiment \
+  --owned-path "results/moe-branch/k-sweep/" \
+  --resource "gpu:0" \
+  --task "Run the K sweep child experiment, update progress, and report metrics/artifacts to the branch manager."
+```
+
+Send a manager-mediated worker-to-worker message:
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  peer-send moe-k-sweep moe-router-audit \
+  --message "K sweep produced config path results/moe-branch/k-sweep/best_config.yaml; please use it for the router audit." \
+  --notify
+```
+
 Inspect workers:
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers list
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers schedule
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers consult-context --print
+cat .codex/tmux-workers/peer_messages.jsonl
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers capture result-audit --lines 80 --log
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers progress result-audit
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers jobs

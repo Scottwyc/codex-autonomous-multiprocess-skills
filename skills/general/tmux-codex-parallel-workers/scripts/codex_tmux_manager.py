@@ -71,6 +71,10 @@ def schedule_events_path(base: Path) -> Path:
     return base / "schedule_events.jsonl"
 
 
+def peer_messages_path(base: Path) -> Path:
+    return base / "peer_messages.jsonl"
+
+
 def consult_dir_path(base: Path) -> Path:
     return base / "consult"
 
@@ -209,6 +213,19 @@ def load_schedule_events(base: Path, limit: int = 80) -> list[dict[str, Any]]:
     return records
 
 
+def load_peer_messages(base: Path, limit: int = 40) -> list[dict[str, Any]]:
+    path = peer_messages_path(base)
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]:
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
 def ensure_session(session: str, cwd: Path) -> None:
     if tmux("has-session", "-t", session, check=False).returncode == 0:
         return
@@ -261,11 +278,24 @@ def read_task(args: argparse.Namespace) -> str:
     raise SystemExit("Provide --task, --task-file, or pipe a task on stdin.")
 
 
-def write_inbox_message(worker: dict[str, Any], message: str) -> Path:
+def write_inbox_message(
+    worker: dict[str, Any],
+    message: str,
+    *,
+    title: str = "Coordinator Message",
+    source: str | None = None,
+    target: str | None = None,
+) -> Path:
     inbox = Path(worker.get("inbox_dir") or Path(worker["progress_file"]).parent.parent / "inbox" / worker["name"])
     inbox.mkdir(parents=True, exist_ok=True)
     path = inbox / f"{timestamp_slug()}.md"
-    write_text(path, f"# Coordinator Message\n\nCreated: {now_iso()}\n\n{message.rstrip()}\n")
+    header = [f"# {title}", "", f"Created: {now_iso()}"]
+    if source:
+        header.append(f"From: {source}")
+    if target:
+        header.append(f"To: {target}")
+    header.extend(["", message.rstrip(), ""])
+    write_text(path, "\n".join(header))
     return path
 
 
@@ -389,6 +419,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             f"- 查看 worker：`python {MANAGER_PATH} --state-dir {base} list`",
             f"- 查看进展：`python {MANAGER_PATH} --state-dir {base} progress <worker> --lines 40`",
             f"- 查看 jobs：`python {MANAGER_PATH} --state-dir {base} jobs`",
+            f"- 查看 worker 横向消息：`{peer_messages_path(base)}`",
             f"- 查看咨询上下文：`python {MANAGER_PATH} --state-dir {base} consult-context --print`",
             f"- 汇总收口：`python {MANAGER_PATH} --state-dir {base} collect --lines 30`",
             f"- 连接 tmux：`tmux attach -t {session}`",
@@ -407,6 +438,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
                 name,
                 status,
                 worker.get("worker_kind", "standard"),
+                worker.get("parent_worker") or "main",
                 worker.get("mode", "-"),
                 f"{worker.get('session', session)}:{worker.get('window', '-')}",
                 ", ".join(worker.get("resources", [])) or "-",
@@ -416,7 +448,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             ]
         )
     lines.extend(["## Worker 总表", ""])
-    lines.append(markdown_table(["Worker", "状态", "类型", "模式", "tmux", "资源", "模型/推理", "Git branch", "任务摘要"], rows) if rows else "暂无 worker。")
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "模式", "tmux", "资源", "模型/推理", "Git branch", "任务摘要"], rows) if rows else "暂无 worker。")
     lines.append("")
 
     lines.extend(["## Worker 明细", ""])
@@ -434,6 +466,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
                 "",
                 f"- 状态：`{effective_state(worker, session)}`",
                 f"- 类型：`{worker.get('worker_kind', 'standard')}`",
+                f"- 上级 worker：`{worker.get('parent_worker') or 'main-coordinator'}`",
                 f"- 启动时间：{worker.get('created_at', '-')}",
                 f"- 更新时间：{worker.get('updated_at', '-')}",
                 f"- tmux：`{worker.get('session', session)}:{worker.get('window', '-')}`",
@@ -442,6 +475,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
                 f"- 工作目录：`{worker.get('cwd', '-')}`",
                 f"- owned paths：{', '.join(worker.get('owned_paths', [])) or '-'}",
                 f"- resources：{', '.join(worker.get('resources', [])) or '-'}",
+                f"- manager scope：{', '.join(worker.get('manager_scope', [])) or '-'}",
                 f"- workplan：`{workplan_file}`",
                 f"- progress：`{progress_file}`",
                 f"- report：`{report_file}`",
@@ -490,6 +524,23 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
         lines.append(markdown_table(["时间", "事件", "Worker", "说明"], event_rows))
     else:
         lines.append("暂无调度事件。")
+
+    peer_messages = load_peer_messages(base, 30)
+    lines.extend(["", "## Worker 横向消息", ""])
+    if peer_messages:
+        peer_rows = [
+            [
+                item.get("timestamp", ""),
+                item.get("source", ""),
+                item.get("target", ""),
+                one_line(item.get("summary", ""), 120),
+                item.get("inbox_file", ""),
+            ]
+            for item in peer_messages
+        ]
+        lines.append(markdown_table(["时间", "来源", "目标", "摘要", "Inbox"], peer_rows))
+    else:
+        lines.append("暂无 worker 横向消息。")
     lines.extend(
         [
             "",
@@ -518,6 +569,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
                 name,
                 effective_state(worker, session),
                 worker.get("worker_kind", "standard"),
+                worker.get("parent_worker") or "main",
                 worker.get("mode", "-"),
                 f"{worker.get('session', session)}:{worker.get('window', '-')}",
                 f"{worker.get('model', '-')}/{worker.get('reasoning_effort', '-')}",
@@ -534,6 +586,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         f"State dir：`{base}`",
         f"调度总览：`{schedule_doc_path(base)}`",
         f"调度事件：`{schedule_events_path(base)}`",
+        f"worker 横向消息：`{peer_messages_path(base)}`",
         "",
         "## 咨询 worker 规则",
         "",
@@ -555,7 +608,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         "## Worker 总览",
         "",
     ]
-    lines.append(markdown_table(["Worker", "状态", "类型", "模式", "tmux", "模型/推理", "资源", "任务摘要"], rows) if rows else "暂无 worker。")
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "模式", "tmux", "模型/推理", "资源", "任务摘要"], rows) if rows else "暂无 worker。")
     lines.extend(["", "## 关键文件", ""])
     for name, worker in sorted(workers.items()):
         lines.extend(
@@ -732,6 +785,8 @@ def create_worker_docs(
     model: str | None,
     reasoning_effort: str | None,
     notes: str | None,
+    parent_worker: str | None,
+    manager_scope: list[str],
 ) -> dict[str, Path]:
     started = now_iso()
     workplan = base / "workplans" / f"{name}.md"
@@ -746,6 +801,22 @@ def create_worker_docs(
     resource_text = "\n".join(f"- {item}" for item in resources) if resources else "- None declared."
     git_text = "\n".join(f"- {key}: {value}" for key, value in (git_meta or {}).items()) if git_meta else "- Shared working tree."
     note_text = notes or "None."
+    parent_text = parent_worker or "main-coordinator"
+    manager_scope_text = "\n".join(f"- {item}" for item in manager_scope) if manager_scope else "- None declared."
+    branch_manager_text = (
+        f"""You may coordinate subordinate front-line workers for this branch through manager commands.
+
+Launch child workers with explicit ownership and this parent marker:
+
+```bash
+python {MANAGER_PATH} --state-dir {base} --session {session} launch <child-worker> --parent-worker {name} --worker-kind autonomous-experiment --task '<bounded child task>'
+```
+
+Use `peer-send` for short worker-to-worker evidence transfer, and use `schedule-note` for non-obvious branch decisions. Do not edit registry, status, schedule, or consultation files directly.
+"""
+        if worker_kind == "branch-manager"
+        else "Not a branch-manager worker."
+    )
     inbox.mkdir(parents=True, exist_ok=True)
     write_text(
         workplan,
@@ -753,6 +824,7 @@ def create_worker_docs(
 
 Created: {started}
 Worker kind: {worker_kind}
+Parent worker: {parent_text}
 Session: {session}
 Window: {window}
 Working directory: {cwd}
@@ -775,6 +847,10 @@ Reasoning effort: {reasoning_effort or "Codex CLI default"}
 
 {resource_text}
 
+## Manager Scope
+
+{manager_scope_text}
+
 ## Git Isolation
 
 {git_text}
@@ -792,6 +868,20 @@ Register background jobs with:
 ```bash
 python {MANAGER_PATH} --state-dir {base} --session {session} job-add {name} --pid <PID> --name <job-name> --log <log-path> --command '<command>'
 ```
+
+## Peer Communication
+
+Send short evidence or dependency messages to another worker with:
+
+```bash
+python {MANAGER_PATH} --state-dir {base} --session {session} peer-send {name} <target-worker> --message '<short factual message with evidence paths>'
+```
+
+Peer messages may share evidence, blockers, and coordination facts. They must not unilaterally change another worker's assigned scope, resources, or final decision gate.
+
+## Branch Manager Instructions
+
+{branch_manager_text}
 
 ## Coordinator Notes
 
@@ -813,6 +903,7 @@ python {MANAGER_PATH} --state-dir {base} --session {session} job-add {name} --pi
 Updated: {started}
 Status: launched
 Worker kind: {worker_kind}
+Parent worker: {parent_text}
 Session: {session}:{window}
 Working directory: {cwd}
 
@@ -834,6 +925,7 @@ Working directory: {cwd}
 
 Created: {started}
 Worker kind: {worker_kind}
+Parent worker: {parent_text}
 Task: {task}
 Session: {session}:{window}
 
@@ -1058,8 +1150,8 @@ def cmd_launch(args: argparse.Namespace) -> None:
         raise SystemExit(f"tmux window already exists: {args.session}:{window}")
 
     worker_kind = args.worker_kind
-    mode = args.mode or ("interactive" if worker_kind == "autonomous-experiment" else "exec")
-    start_supervisor = args.start_supervisor or (worker_kind == "autonomous-experiment" and not args.no_start_supervisor)
+    mode = args.mode or ("interactive" if worker_kind in {"autonomous-experiment", "branch-manager"} else "exec")
+    start_supervisor = args.start_supervisor or (worker_kind in {"autonomous-experiment", "branch-manager"} and not args.no_start_supervisor)
     task = read_task(args)
     git_meta = None
     cwd = requested_cwd
@@ -1070,6 +1162,17 @@ def cmd_launch(args: argparse.Namespace) -> None:
     resources = args.resource or []
     model, reasoning_effort = resolve_model_settings(args)
     registry = load_registry(base)
+    parent_worker = safe_name(args.parent_worker) if args.parent_worker else None
+    if parent_worker:
+        if parent_worker == name:
+            raise SystemExit("A worker cannot be its own parent.")
+        parent_record = registry.get("workers", {}).get(parent_worker)
+        if not parent_record:
+            raise SystemExit(f"unknown parent worker: {parent_worker}")
+        if parent_record.get("worker_kind") != "branch-manager":
+            raise SystemExit(f"parent worker must be worker_kind=branch-manager: {parent_worker}")
+    if args.manager_scope and worker_kind != "branch-manager":
+        raise SystemExit("--manager-scope is only valid for --worker-kind branch-manager.")
     check_launch_conflicts(
         registry,
         name=name,
@@ -1099,6 +1202,8 @@ def cmd_launch(args: argparse.Namespace) -> None:
         model=model,
         reasoning_effort=reasoning_effort,
         notes=args.notes,
+        parent_worker=parent_worker,
+        manager_scope=args.manager_scope or [],
     )
 
     scope_lines = []
@@ -1110,6 +1215,25 @@ def cmd_launch(args: argparse.Namespace) -> None:
     if args.notes:
         scope_lines.append("Coordinator notes:")
         scope_lines.append(args.notes)
+    if parent_worker:
+        scope_lines.append(f"Parent worker: {parent_worker}")
+    if args.manager_scope:
+        scope_lines.append("Manager scope:")
+        scope_lines.extend(f"- {item}" for item in args.manager_scope)
+    if worker_kind == "branch-manager":
+        scope_lines.extend(
+            [
+                "Branch manager worker rules:",
+                "- You are a subordinate management worker for one major branch. The main coordinator delegates branch-level planning and first-pass integration to you.",
+                "- Decompose the branch into bounded child workers, usually `--worker-kind autonomous-experiment` for real experiment branches.",
+                f"- Launch child workers with `--parent-worker {name}` plus explicit `--owned-path`, `--resource`, write scope, and expected report.",
+                "- You may send, interrupt, peer-send, collect, and schedule-note for child workers inside your assigned manager scope.",
+                "- You may allow short factual peer communication among child workers, but scope/resource changes still require you or the main coordinator to record a decision.",
+                "- Keep your own progress/report as the branch control document: child table, resources, current results, blockers, and next coordination decision.",
+                "- Keep main-coordinator-facing updates compact. Do not paste raw child logs; cite child reports, captures, jobs, and artifacts.",
+                "- Do not make final merge, promotion, user-facing conclusion, or cross-branch resource decisions unless the main coordinator explicitly delegates that decision.",
+            ]
+        )
     if worker_kind == "autonomous-experiment":
         scope_lines.extend(
             [
@@ -1131,6 +1255,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
             "Do not revert edits made by the coordinator or other workers. Stay inside the assigned task and report changed files, commands run, results, blockers, and next recommended action before exiting.",
             "Update the progress file at key milestones and before completion. If you produce a longer result, write it into the report file.",
             "Coordinator context budget: keep progress/report updates and tmux replies concise. Do not paste raw logs, full diffs, long tables, or complete transcripts into coordinator-facing updates; write them to artifact/log files and cite paths with a short summary.",
+            "Worker-to-worker communication is allowed only through manager-mediated `peer-send` messages. Use it for short factual evidence, blockers, or dependency notices; do not treat peer messages as permission to change assigned scope or resources.",
             "The worker state directory is mounted writable for progress/report/job registration. Do not edit workers.json, status files, schedule files, or registry files manually; use the manager commands when state changes are needed.",
             "Check the inbox directory before major transitions and after coordinator messages; it may contain queued instructions that are also sent through tmux.",
             "If you start any background process, register it with the manager using the job-add command shown in the worker plan.",
@@ -1181,6 +1306,8 @@ def cmd_launch(args: argparse.Namespace) -> None:
         "session": args.session,
         "mode": mode,
         "worker_kind": worker_kind,
+        "parent_worker": parent_worker,
+        "manager_scope": args.manager_scope or [],
         "cwd": str(cwd),
         "prompt_file": str(prompt_file),
         "log_file": str(log_file),
@@ -1207,12 +1334,14 @@ def cmd_launch(args: argparse.Namespace) -> None:
         base,
         "launch",
         worker=name,
-        detail=f"Launched {args.mode} worker at {args.session}:{window}",
-        data={"cwd": str(cwd), "resources": resources, "owned_paths": owned_paths},
+        detail=f"Launched {mode} worker at {args.session}:{window}",
+        data={"cwd": str(cwd), "resources": resources, "owned_paths": owned_paths, "parent_worker": parent_worker},
     )
     refresh_schedule_doc(base, registry)
     print(f"launched {name} at {args.session}:{window}")
     print(f"worker_kind={worker_kind}")
+    if parent_worker:
+        print(f"parent_worker={parent_worker}")
     print(f"mode={mode}")
     print(f"attach=tmux attach -t {args.session}  # then switch to window {window}")
     print(f"log={log_file}")
@@ -1246,7 +1375,8 @@ def cmd_list(args: argparse.Namespace) -> None:
         status_data = read_status_file(worker) or {}
         exit_part = f" exit={status_data.get('exit_code')}" if "exit_code" in status_data else ""
         resources = ",".join(worker.get("resources", [])) or "-"
-        print(f"{name}\t{status}{exit_part}\tkind={worker.get('worker_kind', 'standard')}\tmode={worker.get('mode', '-')}\t{session}:{window}\tresources={resources}\t{worker.get('cwd', '')}\t{worker.get('log_file', '')}")
+        parent = worker.get("parent_worker") or "main"
+        print(f"{name}\t{status}{exit_part}\tkind={worker.get('worker_kind', 'standard')}\tparent={parent}\tmode={worker.get('mode', '-')}\t{session}:{window}\tresources={resources}\t{worker.get('cwd', '')}\t{worker.get('log_file', '')}")
 
 
 def cmd_capture(args: argparse.Namespace) -> None:
@@ -1311,6 +1441,74 @@ def cmd_interrupt_send(args: argparse.Namespace) -> None:
     args.escape_first = False
     args.escape_after = True
     cmd_send(args)
+
+
+def cmd_peer_send(args: argparse.Namespace) -> None:
+    base = state_dir(args.state_dir)
+    registry = load_registry(base)
+    workers = registry.get("workers", {})
+    source_name = safe_name(args.source)
+    target_name = safe_name(args.target)
+    source = workers.get(source_name)
+    target_worker = workers.get(target_name)
+    if not source:
+        raise SystemExit(f"unknown source worker: {args.source}")
+    if not target_worker:
+        raise SystemExit(f"unknown target worker: {args.target}")
+    if source_name == target_name:
+        raise SystemExit("source and target workers must be different.")
+    message = args.message
+    if args.message_file:
+        message = Path(args.message_file).expanduser().read_text(encoding="utf-8")
+    if not message.strip():
+        raise SystemExit("Provide a non-empty --message or --message-file.")
+    inbox_file = write_inbox_message(
+        target_worker,
+        message,
+        title="Peer Worker Message",
+        source=source_name,
+        target=target_name,
+    )
+    record = {
+        "timestamp": now_iso(),
+        "source": source_name,
+        "target": target_name,
+        "inbox_file": str(inbox_file),
+        "summary": one_line(message, 220),
+        "notified": bool(args.notify),
+    }
+    append_text(peer_messages_path(base), json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    append_text(
+        Path(source.get("progress_file", base / "progress" / f"{source_name}.md")),
+        f"\n- {now_iso()} Peer message sent to `{target_name}`: `{inbox_file}`\n",
+    )
+    append_text(
+        Path(target_worker.get("progress_file", base / "progress" / f"{target_name}.md")),
+        f"\n- {now_iso()} Peer message received from `{source_name}`: `{inbox_file}`\n",
+    )
+    if args.notify:
+        session = target_worker["session"]
+        window = target_worker["window"]
+        if not window_exists(session, window):
+            print(f"warning: target worker window is not present: {session}:{window}; message written to {inbox_file}", file=sys.stderr)
+        else:
+            send_prompt(
+                f"{session}:{window}",
+                f"Peer message from {source_name} is available at: {inbox_file}\n"
+                "Read it at the next safe checkpoint. Treat it as factual evidence or a dependency notice; do not change assigned scope/resources unless your branch manager or coordinator records a decision.",
+                escape_first=args.escape_first,
+                escape_after=args.escape_after,
+            )
+    append_manager_log(base, f"peer-send source={source_name} target={target_name} notify={args.notify} inbox={inbox_file}")
+    append_schedule_event(
+        base,
+        "peer-send",
+        worker=source_name,
+        detail=f"Peer message {source_name} -> {target_name}; inbox={inbox_file}",
+        data={"source": source_name, "target": target_name, "inbox_file": str(inbox_file), "notified": bool(args.notify)},
+    )
+    refresh_schedule_doc(base, registry)
+    print(f"inbox={inbox_file}")
 
 
 def cmd_progress(args: argparse.Namespace) -> None:
@@ -1797,16 +1995,26 @@ def cmd_collect(args: argparse.Namespace) -> None:
     registry = load_registry(base)
     out = Path(args.output).expanduser().resolve() if args.output else base / "reports" / f"COORDINATOR_SUMMARY_{timestamp_slug()}.md"
     parts = [f"# Codex Tmux Worker Collection\n\nGenerated: {now_iso()}\nState dir: {base}\n"]
+    peer_messages = load_peer_messages(base, 20)
+    if peer_messages:
+        parts.append("\n## Recent Peer Messages\n\n")
+        for item in peer_messages:
+            parts.append(
+                f"- {item.get('timestamp', '')} {item.get('source', '')} -> {item.get('target', '')}: "
+                f"{one_line(item.get('summary', ''), 160)} ({item.get('inbox_file', '')})\n"
+            )
     for name, worker in sorted(registry.get("workers", {}).items()):
         status = effective_state(worker, args.session)
         jobs = load_jobs(jobs_path_for(base, worker), name).get("jobs", [])
         parts.append(f"\n## {name}\n\n")
         parts.append(f"- State: {status}\n")
         parts.append(f"- Worker kind: {worker.get('worker_kind', 'standard')}\n")
+        parts.append(f"- Parent worker: {worker.get('parent_worker') or 'main-coordinator'}\n")
         parts.append(f"- Mode: {worker.get('mode', '-')}\n")
         parts.append(f"- Target: {worker.get('session')}:{worker.get('window')}\n")
         parts.append(f"- CWD: {worker.get('cwd')}\n")
         parts.append(f"- Resources: {', '.join(worker.get('resources', [])) or '-'}\n")
+        parts.append(f"- Manager scope: {', '.join(worker.get('manager_scope', [])) or '-'}\n")
         if worker.get("git_worktree"):
             meta = worker["git_worktree"]
             parts.append(f"- Git worktree: {meta.get('worktree_path')} branch={meta.get('branch')}\n")
@@ -2119,8 +2327,10 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--resource", action="append", help="Repeatable resource token, such as gpu:0, port:6006, or out:results/run-a.")
     launch.add_argument("--allow-conflict", action="store_true", help="Allow declared owned-path/resource conflicts.")
     launch.add_argument("--notes", help="Coordinator notes to include in the prompt.")
-    launch.add_argument("--worker-kind", choices=["standard", "autonomous-experiment"], default="standard", help="Worker template. autonomous-experiment defaults to visible interactive mode and supervisor.")
-    launch.add_argument("--mode", choices=["exec", "interactive"], help="Defaults to exec for standard workers and interactive for autonomous-experiment workers.")
+    launch.add_argument("--worker-kind", choices=["standard", "autonomous-experiment", "branch-manager"], default="standard", help="Worker template. autonomous-experiment and branch-manager default to visible interactive mode and supervisor.")
+    launch.add_argument("--parent-worker", help="Parent branch-manager worker name for subordinate workers.")
+    launch.add_argument("--manager-scope", action="append", help="Repeatable branch-management authority note for branch-manager workers.")
+    launch.add_argument("--mode", choices=["exec", "interactive"], help="Defaults to exec for standard workers and interactive for autonomous-experiment/branch-manager workers.")
     launch.add_argument("--startup-wait", type=int, default=8, help="Seconds to wait before pasting the initial prompt into an interactive worker.")
     launch.add_argument("--model", help=f"Codex model for the worker. Default best model: {DEFAULT_WORKER_MODEL}.")
     launch.add_argument("--reasoning-effort", help=f"Codex reasoning effort. Default best effort: {DEFAULT_WORKER_REASONING}.")
@@ -2163,6 +2373,16 @@ def build_parser() -> argparse.ArgumentParser:
     interrupt.add_argument("--message-file", help="Read message from file.")
     interrupt.add_argument("--via-inbox", action="store_true", help="Write the message into the worker inbox and paste a short read-this-file instruction.")
     interrupt.set_defaults(func=cmd_interrupt_send)
+
+    peer_send = sub.add_parser("peer-send", help="Write a manager-mediated worker-to-worker message.")
+    peer_send.add_argument("source", help="Source worker name.")
+    peer_send.add_argument("target", help="Target worker name.")
+    peer_send.add_argument("--message", default="", help="Short factual peer message.")
+    peer_send.add_argument("--message-file", help="Read peer message from file.")
+    peer_send.add_argument("--notify", action="store_true", help="Also paste a short read-inbox notice into the target worker tmux pane.")
+    peer_send.add_argument("--escape-first", action="store_true", help="Send Escape before notifying the target worker.")
+    peer_send.add_argument("--escape-after", action="store_true", help="Send Escape after notifying the target worker.")
+    peer_send.set_defaults(func=cmd_peer_send)
 
     progress = sub.add_parser("progress", help="Show worker progress files.")
     progress.add_argument("name", nargs="?")
