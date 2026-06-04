@@ -5,6 +5,7 @@
 Maintain one stable, concise navigation document that lets a user answer:
 
 - What are the project targets?
+- What does each target mean?
 - Which targets are complete, boundary-complete, active, blocked, or pending?
 - What are the latest accepted conclusions and metrics?
 - Where are the readable reports, canonical result directories, and figures?
@@ -48,11 +49,13 @@ Include:
 
 Use one row per target:
 
-| Target | Status | Latest accepted conclusion | Key result documents | Result directory | Active progress | Next gate |
-|---|---|---|---|---|---|---|
+| Target | Definition | Status | Latest accepted conclusion | Key result documents | Result directory | Active progress | Next gate |
+|---|---|---|---|---|---|---|---|
 
 Rules:
 
+- Give every target a short, stable, problem- or outcome-oriented definition.
+- Keep the definition separate from current status, accepted conclusions, and active work. Change it only when the target scope changes.
 - Keep conclusions to one or two sentences.
 - Link readable reports first.
 - Link canonical result directories after reports.
@@ -94,6 +97,7 @@ Validate local links:
 ```bash
 python /path/to/long-running-autonomous-project-management/scripts/validate_user_results_dashboard.py \
   docs/<project>-key-results-dashboard.md \
+  --require-target-definitions \
   --require-section "目标总览" \
   --require-section "正在进行" \
   --require-section "关键结果索引"
@@ -104,6 +108,7 @@ python /path/to/long-running-autonomous-project-management/scripts/validate_user
 Refresh the dashboard when any of these materially changes:
 
 - target status or accepted conclusion
+- target definition or scope
 - key metric or comparison
 - readable result document, result directory, or figure set
 - active owner or branch
@@ -123,9 +128,9 @@ Do not refresh it for unchanged polls, supervisor captures, log growth, or inter
 
 ## 目标总览
 
-| Target | 状态 | 最新结论 | 关键结果文档 | 关键结果目录 | 正在进行 | 下一 gate |
-|---|---|---|---|---|---|---|
-| T1 | 已完成 | <accepted conclusion> | [详细报告](report.md) | [结果目录](../results/t1/) | 无 | 仅在新证据出现时刷新 |
+| Target | 目标简洁定义 | 状态 | 最新结论 | 关键结果文档 | 关键结果目录 | 正在进行 | 下一 gate |
+|---|---|---|---|---|---|---|---|
+| T1 | 用一句话说明该目标要解决的问题或交付结果。 | 已完成 | <accepted conclusion> | [详细报告](report.md) | [结果目录](../results/t1/) | 无 | 仅在新证据出现时刷新 |
 
 ## 正在进行
 

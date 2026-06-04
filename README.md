@@ -474,15 +474,16 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 docs/<project>-key-results-dashboard.md
 ```
 
-它与 `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` 分工不同：调度文档解释控制面和 worker；关键结果看板解释每个目标当前是什么状态、已经得到什么关键结论、可阅读报告和 canonical 结果目录在哪里、哪条分支正在推进、下一项判定 gate 是什么。
+它与 `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` 分工不同：调度文档解释控制面和 worker；关键结果看板为每个目标维护一句稳定、问题导向的简洁定义，并解释当前状态、已接受关键结论、可阅读报告和 canonical 结果目录在哪里、哪条分支正在推进、下一项判定 gate 是什么。目标定义与当前状态/结论分列，只在目标范围变化时更新。
 
-看板使用相对 Markdown 链接直达报告、结果目录、图和活跃 progress；仅在目标状态、接受结论、关键指标、关键产物、active owner、blocker 或 next gate 发生实质变化时刷新。不要把重复监控、PID、原始日志和历史时间线堆入看板。
+看板使用相对 Markdown 链接直达报告、结果目录、图和活跃 progress；仅在目标定义/范围、目标状态、接受结论、关键指标、关键产物、active owner、blocker 或 next gate 发生实质变化时刷新。不要把重复监控、PID、原始日志和历史时间线堆入看板。
 
 校验本地链接：
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/long-running-autonomous-project-management/scripts/validate_user_results_dashboard.py" \
   docs/<project>-key-results-dashboard.md \
+  --require-target-definitions \
   --require-section "目标总览" \
   --require-section "正在进行" \
   --require-section "关键结果索引"

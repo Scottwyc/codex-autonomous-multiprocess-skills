@@ -43,7 +43,7 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - Ideas doc: hypotheses and new directions
    - Chinese follow-up file: chronological operational trail for launches, monitoring, failures, decisions, and next actions
    - Chinese key phase summary file: a complete summary document covering the task definition, data, model framework, training framework or protocol, stage results, artifact paths, risks, and next-stage plan
-   - User-facing key-results dashboard: concise current-state target index with clickable result documents, result directories, active progress, and next gates
+   - User-facing key-results dashboard: concise current-state target index with one stable definition per target plus clickable result documents, result directories, active progress, and next gates
    - Use a concrete timestamp with timezone on every status or log entry, for example `2026-05-03 21:40:00 CST`.
    - Update operational docs only at meaningful events. Repeated unchanged polls must not create follow-up, schedule, consultation, or compact-memory entries.
    - Keep schedule, context pack, compact memory, consultation context, and recovery handoff as bounded current-state views. Put full history in event logs, worker reports, or timestamped archives.
@@ -77,12 +77,12 @@ Keep one stable project-owned dashboard, normally `docs/<project>-key-results-da
 
 Required current-state views:
 
-- target overview: status, accepted conclusion, key result docs, result directory, active progress, next gate
+- target overview: concise stable definition, status, accepted conclusion, key result docs, result directory, active progress, next gate
 - active work: owner/branch, current milestone, expected output, next meaningful check
 - completed result index: direct links to external-reader reports, phase summaries, figures, and canonical result roots
 - blockers and claim boundaries: why an item is not complete and what evidence would change that
 
-Use relative Markdown links whenever possible. Prefer readable reports before machine result directories. Write `待生成`, `无`, or `未授权` instead of creating a broken link. Refresh only on material changes and validate local links with `scripts/validate_user_results_dashboard.py`.
+Definitions should state the problem, intended outcome, or closure gate in one short sentence; keep them separate from current status and change them only when scope changes. Use relative Markdown links whenever possible. Prefer readable reports before machine result directories. Write `待生成`, `无`, or `未授权` instead of creating a broken link. Refresh only on material changes and validate definitions plus local links with `scripts/validate_user_results_dashboard.py --require-target-definitions`.
 
 ## Resource Planning Heuristics
 

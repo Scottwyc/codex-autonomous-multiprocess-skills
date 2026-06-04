@@ -55,8 +55,8 @@ After a target is defined:
 6. Update documents continuously.
    - Maintain a status doc, an experiment log, and an ideas or exploration doc when the project benefits from persistent memory.
    - For long-running tasks, maintain both a Chinese follow-up file and a Chinese key phase summary file. The follow-up file keeps the chronological operational trail; the key phase summary file captures milestone conclusions, protocols, artifacts, and next-stage decisions.
-   - Maintain one stable user-facing key-results dashboard, preferably under `docs/`, with clickable relative links to every target's status, key result documents, result directories, active progress, and next gate. Keep it separate from `.codex` control-plane files.
-   - Refresh the key-results dashboard only when a target status, accepted conclusion, key metric, result document/directory, active owner, blocker, or next gate materially changes. Validate local links after each refresh.
+   - Maintain one stable user-facing key-results dashboard, preferably under `docs/`, with a concise stable definition and clickable relative links for every target's status, key result documents, result directories, active progress, and next gate. Keep it separate from `.codex` control-plane files.
+   - Refresh the key-results dashboard only when a target definition or scope, status, accepted conclusion, key metric, result document/directory, active owner, blocker, or next gate materially changes. Validate target definitions and local links after each refresh.
    - Record the current state, the reason for each launch, the key metric, and the next decision.
    - When recording metrics, always name the model or architecture, data scenario, split or sample scope, input protocol, checkpoint or epoch, and metric meaning. Do not write bare scores without saying what produced them and where they were measured.
    - Every status or log entry must include a concrete timestamp with timezone, such as `2026-05-03 21:40:00 CST`; do not rely on relative wording like "today", "now", or "latest".
@@ -123,13 +123,14 @@ While waiting:
 
 Maintain one concise current-state dashboard for the user, normally `docs/<project>-key-results-dashboard.md`.
 
-- Give every target one row with status, latest accepted conclusion, key result documents, key result directory, active progress/owner, and next gate.
+- Give every target one row with a concise stable definition, status, latest accepted conclusion, key result documents, key result directory, active progress/owner, and next gate.
+- Write the definition as one short problem- or outcome-oriented sentence. Keep it separate from current status and conclusions, and change it only when the target's scope changes.
 - Use clickable relative Markdown links; link directly to readable reports first, then result directories and live progress.
 - Separate completed, negative/boundary-complete, in-progress, blocked/fail-closed, and pending states. Never turn a partial result or documentation-only closeout into a completed target.
 - Keep worker internals, raw logs, repeated unchanged checks, and historical timelines out of this dashboard. Those belong in `.codex` control files, follow-up logs, and reports.
 - Update at meaningful state transitions and validate links before presenting it to the user.
 
-Read [references/user-key-results-dashboard.md](references/user-key-results-dashboard.md) when creating or restructuring the dashboard. Use `scripts/validate_user_results_dashboard.py` to check local links.
+Read [references/user-key-results-dashboard.md](references/user-key-results-dashboard.md) when creating or restructuring the dashboard. Use `scripts/validate_user_results_dashboard.py --require-target-definitions` to check target definitions and local links.
 
 ### 4b. Default Tmux Codex Worker Layer
 
@@ -229,7 +230,7 @@ For sustained autonomous follow-up, documentation must include two separate Chin
 - A follow-up file that is updated continuously with timestamped launches, monitoring checkpoints, failures, decisions, and next actions.
 - A key phase summary file that is updated at each milestone or phase boundary as a complete summary document. It must explain what the task is, what data is used, what model framework is used, what training framework or protocol is used, what the stage results show, what artifact paths matter, what risks remain, and what the next plan is.
 
-Also maintain one user-facing key-results dashboard. It is a concise clickable index of target status, accepted results, result directories, active progress, and next gates. It must not become a third operational log.
+Also maintain one user-facing key-results dashboard. It is a concise clickable index of each target's stable definition, status, accepted results, result directories, active progress, and next gates. It must not become a third operational log.
 
 Do not let these artifacts replace one another. The follow-up file is the operational timeline; the key phase summary file is the restartable conclusion record; the key-results dashboard is the user's current navigation entry point.
 
@@ -281,7 +282,7 @@ Create a specialized skill when the project has stable recurring rules, named ar
 5. Put the final target in the derived skill's mission or operating rules so future sessions know what "keep going" means.
 6. Keep this general workflow as the base, then add only the project-specific rules.
 7. Include the project-specific Chinese follow-up file path and Chinese key phase summary file path in the derived skill's documentation rules.
-8. Include the project-specific user-facing key-results dashboard path and require clickable links plus link validation.
+8. Include the project-specific user-facing key-results dashboard path and require one concise stable definition per target, clickable links, definition validation, and link validation.
 9. Preserve the autonomous-interruption rule as a hard requirement: user questions, corrections, or aborted waits are intermediate interactions; after handling them, the derived skill must resume the original follow-up unless the user explicitly stops, pauses, or exits autonomous follow-up mode.
 10. Preserve the default tmux Codex worker layer unless the specialized domain has a concrete reason to disable worker parallelism.
 

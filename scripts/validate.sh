@@ -41,6 +41,9 @@ for path in sorted((root / "skills").rglob("*.py")):
     print(f"python ok: {path.relative_to(root)}")
 PY
 
+PYTHONDONTWRITEBYTECODE=1 python -m unittest -q \
+  "$REPO_ROOT/skills/general/long-running-autonomous-project-management/scripts/test_validate_user_results_dashboard.py"
+
 if find "$REPO_ROOT" -type d -name __pycache__ | grep -q .; then
   echo "warning: __pycache__ directories found" >&2
   find "$REPO_ROOT" -type d -name __pycache__ >&2
