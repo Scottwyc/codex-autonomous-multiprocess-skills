@@ -43,11 +43,12 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - Ideas doc: hypotheses and new directions
    - Chinese follow-up file: chronological operational trail for launches, monitoring, failures, decisions, and next actions
    - Chinese key phase summary file: a complete summary document covering the task definition, data, model framework, training framework or protocol, stage results, artifact paths, risks, and next-stage plan
+   - User-facing key-results dashboard: concise current-state target index with clickable result documents, result directories, active progress, and next gates
    - Use a concrete timestamp with timezone on every status or log entry, for example `2026-05-03 21:40:00 CST`.
    - Update operational docs only at meaningful events. Repeated unchanged polls must not create follow-up, schedule, consultation, or compact-memory entries.
    - Keep schedule, context pack, compact memory, consultation context, and recovery handoff as bounded current-state views. Put full history in event logs, worker reports, or timestamped archives.
    - For a dedicated follow-up report, use append-only progress subsections. Each subsection should be one key progress event, and its heading must include a concrete timestamp with timezone, for example `### 2026-05-03 21:40:00 CST Update: validation finished`.
-   - Do not let the follow-up file and key phase summary file collapse into one artifact. The follow-up file is the operational timeline; the key phase summary file is the concise restartable conclusion record.
+   - Do not let the follow-up file, key phase summary, and key-results dashboard collapse into one artifact. The dashboard is navigation and status, not an operational timeline.
 7. Repeat while autonomous follow-up mode is active.
    - Do not voluntarily exit the current session.
    - If the user gives an intermediate instruction, complete it, then resume the overall objective.
@@ -68,6 +69,19 @@ Use these retention defaults:
 - Compact the live registry around 1 MB or 128 records. Investigate and compact current-state Markdown around 1 MB or 5,000 lines.
 - Rotate event and supervisor logs around 1 MB.
 - Keep one watcher per current decision gate and one supervisor per state directory. Stop superseded temporary windows.
+
+## User-Facing Key Results Dashboard
+
+Keep one stable project-owned dashboard, normally `docs/<project>-key-results-dashboard.md`. It is separate from `.codex/tmux-workers/COORDINATOR_SCHEDULE.md`: the schedule explains control-plane activity, while the key-results dashboard explains what the project has achieved and where the evidence lives.
+
+Required current-state views:
+
+- target overview: status, accepted conclusion, key result docs, result directory, active progress, next gate
+- active work: owner/branch, current milestone, expected output, next meaningful check
+- completed result index: direct links to external-reader reports, phase summaries, figures, and canonical result roots
+- blockers and claim boundaries: why an item is not complete and what evidence would change that
+
+Use relative Markdown links whenever possible. Prefer readable reports before machine result directories. Write `待生成`, `无`, or `未授权` instead of creating a broken link. Refresh only on material changes and validate local links with `scripts/validate_user_results_dashboard.py`.
 
 ## Resource Planning Heuristics
 
@@ -177,6 +191,7 @@ When deriving a specialized skill from this template, specify:
 - the project-specific promotion gates
 - the project-specific documentation files
 - the Chinese follow-up file path and Chinese key phase summary file path
+- the user-facing key-results dashboard path
 - whether the default tmux Codex worker layer needs any project-specific launch, resource, or consultation-window rules
 
 Make the final target concrete enough that a later session can decide whether to keep monitoring, launch the next run, pivot, or stop. Do not derive a specialized skill whose mission is only "work on this project" without a measurable or inspectable target.

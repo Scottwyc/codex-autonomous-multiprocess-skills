@@ -8,7 +8,7 @@ This repository packages two Codex skills for long-running autonomous work with 
   - Generic long-running autonomous project management workflow.
   - Defaults to tmux-launched Codex workers for useful non-blocking branch tasks.
   - Uses subordinate branch-manager workers for major experimental branches when direct coordinator tracking would be too heavy.
-  - Defines coordinator responsibilities, monitoring cadence, documentation discipline, and failure handling.
+  - Defines coordinator responsibilities, monitoring cadence, documentation discipline, failure handling, and a user-facing clickable key-results dashboard.
 
 - `tmux-codex-parallel-workers`
   - Launches, supervises, health-monitors, interrupts, resumes, and stops independent Codex CLI workers in separate tmux sessions.
@@ -456,6 +456,28 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - 暂停、停止或保留后台 job
 - 准备向用户汇报阶段性结果
 - 进入下一阶段实验或合并代码前
+
+#### 3.2 面向用户的关键结果看板
+
+长程项目还应维护一份稳定的项目文档，例如：
+
+```text
+docs/<project>-key-results-dashboard.md
+```
+
+它与 `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` 分工不同：调度文档解释控制面和 worker；关键结果看板解释每个目标当前是什么状态、已经得到什么关键结论、可阅读报告和 canonical 结果目录在哪里、哪条分支正在推进、下一项判定 gate 是什么。
+
+看板使用相对 Markdown 链接直达报告、结果目录、图和活跃 progress；仅在目标状态、接受结论、关键指标、关键产物、active owner、blocker 或 next gate 发生实质变化时刷新。不要把重复监控、PID、原始日志和历史时间线堆入看板。
+
+校验本地链接：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/long-running-autonomous-project-management/scripts/validate_user_results_dashboard.py" \
+  docs/<project>-key-results-dashboard.md \
+  --require-section "目标总览" \
+  --require-section "正在进行" \
+  --require-section "关键结果索引"
+```
 
 ### 4. 启动 worker
 
