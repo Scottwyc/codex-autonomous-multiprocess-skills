@@ -25,11 +25,12 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - Treat coordinator context as scarce: worker updates should be summaries with evidence paths; raw logs, full diffs, long tables, and complete transcripts should remain in files unless explicitly needed.
    - Keep `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` refreshed with `compact-memory`; use them as the coordinator's short working memory before loading larger artifacts.
    - When a busy interactive worker needs an immediate redirect, use `interrupt-send`: the manager submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
-   - For long-lived tmux Codex operation, start `start-health-supervisor` to recover interactive panes stuck on known transient Codex network/subprocess errors. When the main Codex is registered inside tmux, use `--restart-main-on-context-full --restart-main-when-missing` so context-window exhaustion or a missing coordinator target launches a new coordinator through `recover-coordinator`.
+   - For long-lived tmux Codex operation, start `start-health-supervisor` to recover interactive panes stuck on known transient Codex network/subprocess errors. When the main Codex is registered inside tmux, use `--restart-main-on-context-full`; add `--restart-main-when-missing` only when coordinator-wide constraints explicitly authorize replacement of a missing coordinator target.
 4. Monitor on a cadence.
-   - Early launch: check frequently.
-   - Stable run: check at a slower cadence.
-   - Near decision point: tighten the cadence.
+   - Early launch or active failure diagnosis: check frequently.
+   - Stable run or known future gate: widen the interval and align the next check with the gate.
+   - After two unchanged checks, widen again. Near completion, regression, failure, or a decision point, tighten the cadence.
+   - Do not write a checkpoint when state, evidence, decision, resource ownership, failure risk, and next action are unchanged.
    - Main-coordinator checks must be short and bounded. Use `compact-memory --print --context-pack`, `supervise --once`, `jobs`, `progress --lines 20`, and short log tails. Use `collect --lines 20/30` or larger schedule/capture only when compact memory is insufficient.
    - Persistent monitor loops must run through `start-supervisor` or `start-health-supervisor` in tmux, not as foreground commands in the coordinator process.
 5. Fill idle time with exploration.
@@ -43,12 +44,30 @@ This reference describes a reusable autonomous follow-up loop for long-running p
    - Chinese follow-up file: chronological operational trail for launches, monitoring, failures, decisions, and next actions
    - Chinese key phase summary file: a complete summary document covering the task definition, data, model framework, training framework or protocol, stage results, artifact paths, risks, and next-stage plan
    - Use a concrete timestamp with timezone on every status or log entry, for example `2026-05-03 21:40:00 CST`.
+   - Update operational docs only at meaningful events. Repeated unchanged polls must not create follow-up, schedule, consultation, or compact-memory entries.
+   - Keep schedule, context pack, compact memory, consultation context, and recovery handoff as bounded current-state views. Put full history in event logs, worker reports, or timestamped archives.
    - For a dedicated follow-up report, use append-only progress subsections. Each subsection should be one key progress event, and its heading must include a concrete timestamp with timezone, for example `### 2026-05-03 21:40:00 CST Update: validation finished`.
    - Do not let the follow-up file and key phase summary file collapse into one artifact. The follow-up file is the operational timeline; the key phase summary file is the concise restartable conclusion record.
 7. Repeat while autonomous follow-up mode is active.
    - Do not voluntarily exit the current session.
    - If the user gives an intermediate instruction, complete it, then resume the overall objective.
    - Stop completely only when the user explicitly says to exit autonomous follow-up mode, such as "退出自主跟进模式" or "exit autonomous follow-up mode".
+
+## Coordinator Context Construction
+
+Build coordinator context from the smallest durable view that can answer the current question:
+
+1. Read `COORDINATOR_CONTEXT_PACK.md`.
+2. Escalate to compact memory, jobs, and short worker progress/report summaries only when needed.
+3. Load schedule, captures, raw logs, full diffs, or large artifacts only for a concrete diagnosis, integration decision, or user audit.
+4. After a meaningful decision, rewrite bounded current-state views and point to evidence paths. Do not copy full history into them.
+
+Use these retention defaults:
+
+- Keep every non-terminal worker plus only a small recent terminal tail in `workers.json`; archive a complete snapshot before pruning.
+- Compact the live registry around 1 MB or 128 records. Investigate and compact current-state Markdown around 1 MB or 5,000 lines.
+- Rotate event and supervisor logs around 1 MB.
+- Keep one watcher per current decision gate and one supervisor per state directory. Stop superseded temporary windows.
 
 ## Resource Planning Heuristics
 
@@ -65,16 +84,20 @@ This reference describes a reusable autonomous follow-up loop for long-running p
 - Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` current so a new main coordinator can recover the mission, worker graph, resources, jobs, branch summaries, peer messages, and next checkpoints after the old coordinator dies or exhausts context.
 - Keep compact memory, schedule, and consultation context compact. They should contain worker status, concise report/progress excerpts, decisions, next checkpoints, and paths to evidence, not full tmux scrollback or raw experiment logs.
 - After every meaningful decision or phase checkpoint, run `compact-memory --note ... --decision ... --next-action ...`; this preserves the decision outside the model context window.
+- Do not call `compact-memory`, `schedule-note`, `consult-sync`, or schedule refresh merely to record that nothing changed.
+- Treat `workers.json` as current state, not the complete historical ledger. Archive before compaction and use `compact-registry` to repair older state directories.
 - When global operating rules change, run `constraints --append ...` or a targeted helper such as `constraints --tensorboard-port-range 16006-16099`, then record the reason with `schedule-note`.
 - Do not keep the coordinator alive with bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded Python loops. Put those jobs in tmux or background processes with registered PID/log/resource ownership.
 
 ## Monitoring Cadence
 
-Use the runtime speed to choose the interval.
+Use progress and the next decision gate to choose the interval.
 
-- Very fresh launch: minutes
-- Short stable job: tens of minutes
-- Long training job: longer waits, with sharper checks around key epochs or promotion gates
+- Very fresh launch or active failure diagnosis: about 5-10 minutes
+- Stable progress: about 15-30 minutes
+- Long stable job or known future gate: about 30-120 minutes, aligned with the gate
+- Two unchanged checks: widen the next interval
+- Material change or failure: reset to a shorter interval until stable
 
 During each check, verify:
 

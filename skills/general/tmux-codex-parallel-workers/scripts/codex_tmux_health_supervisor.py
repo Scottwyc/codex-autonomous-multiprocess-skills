@@ -26,6 +26,8 @@ from typing import Any
 DEFAULT_SESSION = "cw"
 DEFAULT_STATE_DIR = ".codex/tmux-workers"
 MANAGER_PATH = Path(__file__).resolve().with_name("codex_tmux_manager.py")
+LOG_ROTATE_MAX_BYTES = 1_000_000
+LOG_ROTATE_KEEP_LINES = 500
 DEFAULT_ERROR_PATTERNS = [
     "stream disconnected before completion",
     "timeout waiting for child process to exit",
@@ -91,13 +93,41 @@ def append_text(path: Path, text: str) -> None:
         handle.write(text)
 
 
+def rotate_text_log(path: Path) -> None:
+    if not path.is_file() or path.stat().st_size <= LOG_ROTATE_MAX_BYTES:
+        return
+    text = path.read_text(encoding="utf-8", errors="replace")
+    archive_dir = path.parent.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+    archive = archive_dir / f"{path.stem}.{stamp}.{os.getpid()}{path.suffix}"
+    os.replace(path, archive)
+    retained = text.splitlines()[-LOG_ROTATE_KEEP_LINES:]
+    retained_text = "\n".join(retained) + ("\n" if retained else "")
+    retained_max_bytes = max(1, LOG_ROTATE_MAX_BYTES // 4)
+    encoded = retained_text.encode("utf-8")
+    if len(encoded) > retained_max_bytes:
+        retained_text = encoded[-retained_max_bytes:].decode("utf-8", errors="ignore")
+        first_newline = retained_text.find("\n")
+        if first_newline >= 0:
+            retained_text = retained_text[first_newline + 1 :]
+        if retained_text and not retained_text.endswith("\n"):
+            retained_text += "\n"
+    write_text(path, retained_text)
+
+
+def append_bounded_text(path: Path, text: str) -> None:
+    append_text(path, text)
+    rotate_text_log(path)
+
+
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     append_text(path, json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def log(base: Path, level: str, message: str) -> None:
     line = f"{now_iso()} [{level}] {message}\n"
-    append_text(base / "logs" / "health-supervisor.log", line)
+    append_bounded_text(base / "logs" / "health-supervisor.log", line)
     print(line, end="", flush=True)
 
 

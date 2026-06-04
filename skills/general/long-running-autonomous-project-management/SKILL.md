@@ -42,6 +42,10 @@ After a target is defined:
 5. Keep a monitoring cadence that matches runtime.
    - Check early and frequently right after launch.
    - Slow down once a run is stable.
+   - Use event-driven checkpoints, not a fixed short polling rhythm. Write a coordinator checkpoint only when state, evidence, decision, resource ownership, failure risk, or next action materially changes.
+   - During a stable wait with a known next gate, set the next coordinator check near that gate. Do not repeatedly re-read and re-write the same pre-gate state every few minutes.
+   - Adapt the interval by progress: start around 5-10 minutes only for launch stabilization or active failure diagnosis; widen to 15-30 minutes after stable progress; widen to 30-120 minutes for long stable jobs or known future gates; tighten again only near a decision boundary, expected completion, regression, or failure.
+   - After two consecutive unchanged checks, widen the next interval. After a meaningful change or failure, reset to a shorter interval until stability is re-established.
    - Keep coordinator-side checks short and bounded. Do not run bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded monitor loops in the main Codex process.
    - At normal checkpoints, read schedule/progress/report tails and job summaries first. Use short captures only when the summary is insufficient, and load long evidence only for concrete failures, integration review, or explicit user audit.
    - Put persistent monitoring into tmux with `start-supervisor`; use `supervise --once` for coordinator-side spot checks.
@@ -52,6 +56,10 @@ After a target is defined:
    - Record the current state, the reason for each launch, the key metric, and the next decision.
    - When recording metrics, always name the model or architecture, data scenario, split or sample scope, input protocol, checkpoint or epoch, and metric meaning. Do not write bare scores without saying what produced them and where they were measured.
    - Every status or log entry must include a concrete timestamp with timezone, such as `2026-05-03 21:40:00 CST`; do not rely on relative wording like "today", "now", or "latest".
+   - "Continuously" means at meaningful events, not every polling cycle. Do not append a new follow-up, schedule, or compact-memory entry when the evidence, decision, and next action are unchanged.
+   - Keep temporary control documents bounded and replaceable. Current-state schedule/context/consult/recovery-handoff files should contain active workers, current decisions, recent terminal summaries, and evidence pointers only; full historical detail belongs in append-only event files, worker reports, or timestamped archives.
+   - Rotate or archive temporary management documents before they become expensive to read. As a default guardrail, investigate and compact current-state Markdown above about 1 MB or 5,000 lines, and JSONL event files above about 1 MB; preserve the old file in an archive and regenerate a concise current version.
+   - Treat the live worker registry as current state, not full history: retain all non-terminal workers plus only a small recent terminal tail, archive a complete snapshot before pruning, and compact it around 1 MB or 128 records. Rotate manager/supervisor logs. Current recovery handoff must not enumerate every historical stopped worker or repeat every historical worker's file block.
 7. Decide promotion by gate, not by vibe.
    - Promote only when the candidate clears the project's required hard gate.
    - Do not claim success from a quick subset if the final comparison requires a fuller protocol.
@@ -86,6 +94,8 @@ Use an adaptive loop:
 - short interval after launch
 - wider interval for stable training
 - tighter interval near promotion, regression, or early stopping points
+- gate-aligned interval when the next meaningful observation time is known
+- no coordinator checkpoint entry for an unchanged observation
 
 During each checkpoint:
 
@@ -148,7 +158,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
 15. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux sessions or targets accumulate.
 16. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
 17. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
-18. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. If the main Codex itself is registered inside tmux, use `--restart-main-on-context-full --restart-main-when-missing` so the health supervisor launches `recover-coordinator` when the old coordinator exhausts its context window or the registered target disappears.
+18. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. If the main Codex itself is registered inside tmux, use `--restart-main-on-context-full` so the health supervisor launches `recover-coordinator` when the old coordinator exhausts its context window. Add `--restart-main-when-missing` only when coordinator-wide constraints explicitly authorize replacement of a missing coordinator target.
 19. Use the coordinator as the control plane:
    - decide which branch is worth running;
    - cap GPU/CPU/IO usage;

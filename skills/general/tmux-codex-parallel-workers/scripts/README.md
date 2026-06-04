@@ -145,8 +145,8 @@ Context budget defaults:
 Long-running monitors:
 
 ```bash
-python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-supervisor --interval 300
-python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-health-supervisor --interval 30 --restart-main-on-context-full --restart-main-when-missing
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-supervisor --interval 900
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-health-supervisor --interval 30 --restart-main-on-context-full
 ```
 
 ## `codex_tmux_health_supervisor.py`
@@ -208,7 +208,8 @@ Runtime state is written under the selected `--state-dir`, normally:
 
 Important files:
 
-- `workers.json`: worker registry
+- `workers.json`: bounded current-state worker registry
+- `archive/registry/`: timestamped full worker-registry snapshots created before compaction
 - `COORDINATOR_CONSTRAINTS.md`: unified constraints loaded by all launched Codex processes
 - `coordinator_constraints_events.jsonl`: append-only constraints changes
 - `COORDINATOR_CONTEXT_PACK.md`: shortest reload packet for the main coordinator

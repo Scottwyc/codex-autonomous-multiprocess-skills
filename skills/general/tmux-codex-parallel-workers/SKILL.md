@@ -28,11 +28,15 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Use `--owned-path` for paths that the manager should conflict-check.
 3. Record state in the project.
    - Use a project-local state directory, default `.codex/tmux-workers/`.
-   - Keep worker prompts, logs, work plans, progress files, reports, inbox messages, status files, captures, and `workers.json` registry there.
+   - Keep worker prompts, logs, work plans, progress files, reports, inbox messages, status files, captures, and the bounded current-state `workers.json` registry there.
    - Keep `.codex/tmux-workers/COORDINATOR_CONSTRAINTS.md` current as the coordinator-wide constraint contract. All launched workers, branch managers, consultation workers, resumed workers, and recovered coordinators must read it before their task-specific prompt.
    - Keep `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` current so the user can audit the coordinator's worker plan, scheduling decisions, current results, and next actions.
    - The manager mounts the state directory into worker Codex processes with `--add-dir` when using `workspace-write`; this is required when a worker runs in an isolated git worktree and the state directory is outside its `--cd` root.
    - Workers may update their progress/report and use manager commands such as `job-add`, but should not manually edit `workers.json`, status files, schedule files, or registry files.
+   - Treat `COORDINATOR_SCHEDULE.md`, `COORDINATOR_MEMORY.md`, `COORDINATOR_CONTEXT_PACK.md`, `COORDINATOR_RECOVERY.md`, and `consult/CONSULT_CONTEXT.md` as bounded current-state views, not historical logs. They should list current workers, a small recent-terminal summary, current decisions, and evidence pointers only.
+   - Preserve full history in `schedule_events.jsonl`, `coordinator_memory_events.jsonl`, worker progress/report files, and timestamped archives. Rotate bounded event files and archive oversized current-state files before regenerating them.
+   - Treat `workers.json` as a bounded current-state registry, not the complete historical ledger. Keep every non-terminal worker plus only a small recent terminal tail; archive a full timestamped registry snapshot before pruning. Use `compact-registry` when auditing or repairing an older state directory.
+   - Keep manager/supervisor logs bounded and rotated. Recovery handoff must never enumerate every historical stopped worker or every historical worker's key-file block.
 4. Do not launch workers into shared resources blindly.
    - Record project-wide resource rules in `COORDINATOR_CONSTRAINTS.md` before launching workers.
    - Use `constraints --append ...` or `constraints --tensorboard-port-range 16006-16099` to set shared requirements such as TensorBoard safe ports, dashboard bind hosts, output roots, SSH/remote-job rules, or cleanup limits.
@@ -49,6 +53,11 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Coordinator spot checks should start with `compact-memory --print --context-pack`, `compact-memory --print`, `list`, `jobs`, and `progress --lines 20`; use `schedule`, `collect --lines 20/30`, and short `capture --lines 80` only when summaries are insufficient.
    - Keep `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as the coordinator's short reload memory, `COORDINATOR_SCHEDULE.md` as the audit/control document, and `CONSULT_CONTEXT.md` as the user-consultation summary. None of them should become raw scrollback mirrors.
    - After important decisions, run `compact-memory --note ... --decision ... --next-action ...` so the next checkpoint or recovered coordinator can continue from files rather than chat history.
+   - Do not call `compact-memory`, `schedule-note`, `consult-sync`, or schedule refresh merely to record that nothing changed. Repeated unchanged notes are noise and must be coalesced.
+   - Do not render every historical stopped worker, full task text, progress/report tail, or repeated repository-wide Git diff into the schedule or consultation context. Use the registry and artifact paths for deep audit.
+   - When `workers.json` grows beyond roughly 1 MB or 128 records, compact it immediately. The manager automatically applies this guardrail on registry writes; do not disable it to preserve history because full snapshots belong under `archive/registry/`.
+   - Keep only one supervisor per state directory. Duplicate supervisors create duplicate captures, schedule refreshes, and progress entries.
+   - Default supervisor cadence should be conservative: about 15 minutes for ordinary captures, about 1 hour for heavy schedule/context refreshes, and about 2 hours for unchanged progress heartbeats. Tighten temporarily only for launch stabilization or failure diagnosis.
 7. Use independent tmux sessions by default.
    - `--session cw` is a namespace/prefix, not a shared session, unless `--shared-session` is explicitly passed.
    - A worker named `exp-a` should normally run at `cw-exp-a:codex`; consultation runs at `cw-consult:consult`; supervisors run at `cw-supervisor:supervisor` and `cw-health-supervisor:health-supervisor`.
@@ -69,7 +78,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Start it with `start-health-supervisor`; it runs in `cw-health-supervisor:health-supervisor`.
    - It automatically monitors registered interactive workers and the registered main coordinator target unless disabled.
    - When the main coordinator itself runs inside tmux, register it with `register-coordinator` before starting health supervision. This writes `COORDINATOR_RECOVERY.md`, records the coordinator target/model/cwd, and lets a later coordinator reconstruct the run from durable state.
-   - If the registered coordinator hits context-window exhaustion, start health supervision with `--restart-main-on-context-full`; if its tmux target may disappear outright, also use `--restart-main-when-missing`. The health supervisor calls `recover-coordinator`, optionally kills the old pane, and launches a new main coordinator that reads `COORDINATOR_RECOVERY.md`, `COORDINATOR_SCHEDULE.md`, workers, jobs, reports, and consultation context.
+   - If the registered coordinator hits context-window exhaustion, start health supervision with `--restart-main-on-context-full`. Treat `--restart-main-when-missing` as an explicit opt-in only when coordinator-wide constraints authorize automatic replacement of a missing target. The health supervisor calls `recover-coordinator`, optionally kills the old pane, and launches a new main coordinator that reads `COORDINATOR_RECOVERY.md`, `COORDINATOR_SCHEDULE.md`, workers, jobs, reports, and consultation context.
    - It auto-recovers only interactive Codex panes. Use `--observe-target` for panes that should be logged but never receive pasted recovery prompts.
    - It is for recoverable network/subprocess stalls, not semantic experiment failures, quota/auth failures, merge conflicts, or metric regressions.
 12. Use branch-manager workers for major branches.
@@ -81,6 +90,10 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Use `peer-send <source> <target> --message ...` or `--message-file ...`.
    - Peer messages are for short factual evidence, blockers, dependency notices, and artifact paths.
    - Peer messages must not silently change another worker's scope, resources, experiment gate, or final decision authority.
+14. Keep watcher and supervisor lifecycle bounded.
+   - For periodic monitor/watch workers, keep only the watcher for the current decision gate. Stop and mark the superseded watcher before keeping or launching the next one.
+   - Use one supervisor per state directory. Before starting another, inspect tmux and the supervisor status file and remove or stop duplicates.
+   - Use event-driven coordinator updates. Stable unchanged observations should widen the next check interval and should not create schedule, compact-memory, consultation, or progress entries.
 
 ## Manager Script
 
@@ -180,7 +193,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --resource "gpu:0" \
   --task "Run the evaluation plan, keep progress updated, and write a final report." \
   --start-supervisor \
-  --supervisor-interval 300 \
+  --supervisor-interval 900 \
   --query-interactive
 ```
 
@@ -252,6 +265,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers constraints --tensorboard-port-range 16006-16099
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --print --context-pack
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --note "Current branch manager reports are stable." --decision "Wait for running jobs before launching more workers." --next-action "Check jobs and compact memory at the next checkpoint."
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-registry
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers list
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers schedule
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers consult-context --print
@@ -279,7 +293,7 @@ Run or start the supervisor loop:
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers supervise --once
-python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers start-supervisor --interval 300
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers start-supervisor --interval 900
 ```
 
 Start health monitoring and transient-error recovery:
@@ -303,10 +317,10 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   --session cw \
-  start-health-supervisor --restart-main-on-context-full --restart-main-when-missing
+  start-health-supervisor --restart-main-on-context-full
 ```
 
-Use `--dry-run` first if you want detection logs without pasted recovery prompts. Stop it with:
+Add `--restart-main-when-missing` only when coordinator-wide constraints explicitly authorize automatic replacement of a missing target. Use `--dry-run` first if you want detection logs without pasted recovery prompts. Stop it with:
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers --session cw stop-health-supervisor
@@ -468,15 +482,17 @@ This keeps the command auditable and avoids losing long prompts in terminal scro
 
 Use the supervisor for long-running interactive workers or for periodic capture of all worker windows.
 
-- `supervise --once` captures the current tmux output and appends a timestamped pointer into each progress file.
+- `supervise --once` captures the current tmux output and appends a timestamped progress pointer only when the capture or worker state changed, or when the unchanged heartbeat is due.
 - `supervise` without `--once` refuses to run in the coordinator foreground; this prevents unbounded unified exec sessions.
 - `start-supervisor` runs the supervisor loop in a dedicated `cw-supervisor:supervisor` tmux session and is the only normal way to start persistent monitoring.
 - The supervisor writes `.codex/tmux-workers/status/supervisor.json` with its PID, cycle, interval, and last loop timestamp.
-- The loop throttles expensive refreshes: schedule/context refresh defaults to every 900 seconds, and unchanged progress-file appends default to every 1800 seconds.
+- The loop automatically widens its capture interval after two consecutive unchanged cycles, up to the heavy-refresh interval or two hours, and resets to the base interval after a capture change, worker-state change, or supervisor query.
+- The loop throttles expensive refreshes: schedule/context refresh defaults to every 3600 seconds, and unchanged progress-file appends default to every 7200 seconds.
+- `supervise --once` does not append a progress entry when the capture and worker state are unchanged.
 - `--query-interactive` sends a short progress question only to interactive workers marked `stalled` by default. Use `--query-any-running` only when interrupting active workers is acceptable.
 - Use `--query-escape-first` only when you intentionally want the supervisor to send Escape before a query.
 - Do not query `codex exec` workers as if they were interactive. For `exec` workers, use capture/log review.
-- Use `--query-interval` to avoid interrupting interactive workers too frequently; the default is 1800 seconds.
+- Use `--query-interval` to avoid interrupting interactive workers too frequently; the default is 3600 seconds.
 
 The default query/continue pair is intentionally short:
 

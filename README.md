@@ -18,9 +18,11 @@ Together, the two skills form an autonomous multiprocess management framework: a
 
 The framework also treats the coordinator context window as a limited resource. Worker progress, reports, schedule docs, consultation answers, and supervisor captures are designed to summarize first and point to files for long logs, full diffs, large tables, and tmux transcripts.
 
+Recent scheduling defaults make this explicit: coordinator checkpoints are event-driven, stable unchanged runs back off automatically, superseded watch windows are closed, and temporary management files are bounded current-state views rather than ever-growing history. The manager archives full history before compacting `workers.json`, rotates event/supervisor logs, and exposes `compact-registry` for older state directories.
+
 For large experiment lines, the coordinator can delegate branch-level planning to a `branch-manager` worker. That branch manager can launch front-line `autonomous-experiment` children with `--parent-worker`, coordinate short `peer-send` messages between them, and report branch-level summaries back to the main coordinator.
 
-If the main coordinator itself is running inside tmux, it can be registered with `register-coordinator`. The health supervisor can then detect `Codex ran out of room in the model's context window` or a missing registered coordinator target, close the exhausted coordinator pane when present, launch a recovered coordinator in its own tmux session with `recover-coordinator`, and hand it `COORDINATOR_RECOVERY.md` plus the existing worker registry, schedule, progress/report files, jobs, peer messages, branch summaries, and consultation context.
+If the main coordinator itself is running inside tmux, it can be registered with `register-coordinator`. The health supervisor can then detect `Codex ran out of room in the model's context window`, close the exhausted coordinator pane when present, launch a recovered coordinator in its own tmux session with `recover-coordinator`, and hand it `COORDINATOR_RECOVERY.md` plus the existing worker registry, schedule, progress/report files, jobs, peer messages, branch summaries, and consultation context. Replacement of a merely missing coordinator target remains an explicit `--restart-main-when-missing` opt-in.
 
 ## Documentation Maintenance / README 维护规则
 
@@ -61,7 +63,8 @@ README updates should name the feature, explain why it matters, and include a mi
   |     |     |-- session: cw-main-recovered-... window: codex
   |     |
   |     |-- .codex/tmux-workers/
-  |           |-- workers.json             -> worker registry
+  |           |-- workers.json             -> bounded current-state worker registry
+  |           |-- archive/registry/        -> full registry snapshots before compaction
   |           |-- COORDINATOR_CONSTRAINTS.md -> 所有子进程优先加载的统一约束
   |           |-- COORDINATOR_CONTEXT_PACK.md -> 主进程最短上下文包
   |           |-- COORDINATOR_MEMORY.md    -> 主进程压缩工作记忆
@@ -215,6 +218,9 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 - interactive/autonomous-experiment worker 的 tmux pane 应展示“意图、短命令、短 tail/指标、判断、下一步”，不要用整屏训练日志或大表格刷屏。
 - 主进程巡检优先使用 `compact-memory --print --context-pack`、`compact-memory --print`、`list`、`jobs`、`progress --lines 20`；只有短记忆不足时才读 `schedule`、`collect --lines 20/30`、扩大 `capture --lines` 或读取完整 artifact。
 - 主进程做出重要判断后，应运行 `compact-memory --note ... --decision ... --next-action ...`，把聊天上下文里的关键状态压缩进文件。
+- 没有状态、证据、决策、资源、风险或下一步变化时，不写新的 schedule、compact-memory、consult 或 progress 记录。
+- `COORDINATOR_SCHEDULE.md`、`COORDINATOR_MEMORY.md`、`COORDINATOR_CONTEXT_PACK.md`、`COORDINATOR_RECOVERY.md` 和 `CONSULT_CONTEXT.md` 都是可重建的当前态视图；完整历史留在事件日志、worker report 和时间戳 archive 中。
+- `workers.json` 保留全部非终止 worker 和少量近期终止 worker；达到约 1 MB 或 128 条记录时，manager 会先归档完整快照再自动压缩。
 - 咨询 worker 默认也应简洁回答，必要时给出文件路径和命令，让用户自己追溯完整证据。
 
 #### 2.3.1 统一运行约束
@@ -359,6 +365,14 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   compact-memory --print --context-pack
 ```
 
+压缩旧的 worker registry：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  compact-registry
+```
+
 注意：普通执行 worker 使用 `workspace-write` sandbox 时，manager 会额外给 Codex CLI 传入：
 
 ```bash
@@ -380,7 +394,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 #### 3.1 主进程调度文档
 
-调度文档是这套框架的核心审查入口。它由 manager 自动刷新，并由主进程通过 `schedule-note` 补充人为决策。
+调度文档是这套框架的核心审查入口。它由 manager 自动刷新，并由主进程通过 `schedule-note` 补充有实际变化的人为决策；无变化轮次不应生成重复记录。
 
 查看调度文档路径：
 
@@ -419,16 +433,16 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --mission "验证新模型在真实数据和合成数据上的跨域稳定性"
 ```
 
-调度文档包含：
+调度文档作为限界当前态视图，包含：
 
 - 当前总目标
 - 用户审查入口命令
-- worker 总表
-- 每个 worker 的状态、任务、类型、上级 worker、模型、reasoning effort、资源、owned paths、tmux 位置
+- 当前 worker 和少量近期终止 worker 摘要
+- 当前 worker 的状态、任务、类型、上级 worker、模型、reasoning effort、资源、owned paths、tmux 位置
 - workplan/progress/report/inbox/jobs/status 文件路径
 - 后台 job 当前 PID 状态
 - worker 横向消息摘录
-- progress/report 最新摘录
+- 当前 progress/report 最新摘录和完整证据路径
 - git worktree 和 diff 摘要
 - 调度事件日志
 - 主进程审查清单
@@ -497,7 +511,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --resource "gpu:0" \
   --task "Run the evaluation plan, update progress, and write a final report." \
   --start-supervisor \
-  --supervisor-interval 300 \
+  --supervisor-interval 900 \
   --supervisor-query-interval 1800 \
   --query-interactive
 ```
@@ -678,7 +692,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   start-supervisor \
-  --interval 300
+  --interval 900
 ```
 
 不要在主进程里直接运行无界 `supervise`。现在 `supervise` 默认只允许 `--once` 前台检查；无界循环必须通过 `start-supervisor` 进入 tmux 的 `cw-supervisor:supervisor` 独立 session，避免主 Codex 触发 unified exec warning。
@@ -689,9 +703,11 @@ supervisor 做这些事：
 - 写入 `captures/<worker>/latest.txt` 和时间戳 capture。
 - 更新 `status/<worker>.json`。
 - 写入 `status/supervisor.json`，记录 supervisor PID、cycle、interval、last loop 时间。
-- 按节流参数刷新 `COORDINATOR_SCHEDULE.md` 和 `consult/CONSULT_CONTEXT.md`，默认 900 秒一次。
-- 对 progress 文件的未变化 capture 追加也做节流，默认 1800 秒一次，避免长期膨胀。
+- 连续两轮没有变化时自动扩大 capture 间隔，最大不超过重刷新间隔或两小时；一旦发生变化、失败或查询，恢复较短间隔。
+- 按节流参数刷新 `COORDINATOR_SCHEDULE.md` 和 `consult/CONSULT_CONTEXT.md`，默认 3600 秒一次。
+- 对 progress 文件的未变化 capture 追加也做节流，默认 7200 秒一次；`supervise --once` 在无变化时不追加 progress。
 - 如果启用 `--query-interactive`，默认只询问已经被标记为 `stalled` 的 interactive worker；只有显式使用 `--query-any-running` 才会询问仍在 running 的 worker。
+- 同一 state directory 只保留一个 supervisor；周期 watcher 只保留当前决策门对应的一个，下一门启动前先停止旧 watcher。
 
 如果同一段输出长时间不变，worker 会被标记为 `stalled`。默认阈值是 1800 秒，可以用：
 
@@ -707,9 +723,9 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   start-supervisor \
-  --interval 300 \
-  --refresh-schedule-interval 900 \
-  --progress-append-interval 1800
+  --interval 900 \
+  --refresh-schedule-interval 3600 \
+  --progress-append-interval 7200
 ```
 
 ### 8. Health Supervisor：错误卡死自动恢复
@@ -1039,7 +1055,7 @@ The Python scripts under `tmux-codex-parallel-workers/scripts/` are not optional
 
 ### `codex_tmux_manager.py`
 
-Main tmux Codex worker manager. It provides commands to initialize state, register/recover the main coordinator, launch workers, send or interrupt prompts, start consultation windows, start normal and health supervisors, track background jobs, resume workers, collect reports, maintain unified coordinator constraints, compact coordinator memory, and maintain the coordinator context pack, memory, schedule, and recovery handoff documents.
+Main tmux Codex worker manager. It provides commands to initialize state, register/recover the main coordinator, launch workers, send or interrupt prompts, start consultation windows, start normal and health supervisors, track background jobs, resume workers, collect reports, maintain unified coordinator constraints, compact coordinator memory and worker registries, and maintain bounded coordinator context, memory, schedule, consultation, and recovery views.
 
 Typical command:
 
@@ -1050,6 +1066,7 @@ python "$MANAGER" --state-dir .codex/tmux-workers --session cw init --cwd "$PWD"
 python "$MANAGER" --state-dir .codex/tmux-workers --session cw register-coordinator --target <SESSION:WINDOW.PANE> --cwd "$PWD"
 python "$MANAGER" --state-dir .codex/tmux-workers constraints --tensorboard-port-range 16006-16099
 python "$MANAGER" --state-dir .codex/tmux-workers compact-memory --print --context-pack
+python "$MANAGER" --state-dir .codex/tmux-workers compact-registry
 python "$MANAGER" --state-dir .codex/tmux-workers --session cw launch worker-a --cwd "$PWD" --task "Do one bounded branch task and report back."
 ```
 
@@ -1158,8 +1175,8 @@ python "$MANAGER" \
 For long-lived sessions, also start the two monitor layers:
 
 ```bash
-python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-supervisor --interval 300
-python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-health-supervisor --interval 30 --restart-main-on-context-full --restart-main-when-missing
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-supervisor --interval 900
+python "$MANAGER" --state-dir .codex/tmux-workers --session cw start-health-supervisor --interval 30 --restart-main-on-context-full
 ```
 
 Attach to tmux sessions:
@@ -1178,6 +1195,8 @@ tmux attach -t cw-branch-a
 - The framework records worker state under `.codex/tmux-workers/` so users can audit launches, inbox messages, progress, reports, captures, jobs, and scheduling decisions.
 - The coordinator should maintain `COORDINATOR_CONSTRAINTS.md` before launching workers. All launched/resumed workers, branch managers, consultation workers, and recovered coordinators are instructed to read it before task-specific prompts.
 - The coordinator should use `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as short working memory, and should run `compact-memory --note ... --decision ... --next-action ...` after meaningful decisions.
+- The coordinator must not create schedule, memory, consultation, or progress entries for unchanged polling cycles.
+- Temporary coordinator documents and `workers.json` are bounded current-state views; complete history belongs in event logs, worker reports, and timestamped archives.
 - Register tmux-hosted main coordinators with `register-coordinator` when long autonomous recovery matters. A recovered coordinator must start from `COORDINATOR_RECOVERY.md` and `COORDINATOR_SCHEDULE.md`, not from stale memory.
 - Default coordinator checks should start from `compact-memory --print --context-pack`, `list`, `jobs`, and `progress --lines 20`; schedule, collect, larger captures, or raw artifacts are for concrete diagnosis or final review.
 - The health supervisor targets transient Codex pane stalls and, when explicitly enabled, registered-coordinator context exhaustion. It is not a replacement for debugging quota/auth failures, failed tests, merge conflicts, bad metrics, or missing durable project documentation.

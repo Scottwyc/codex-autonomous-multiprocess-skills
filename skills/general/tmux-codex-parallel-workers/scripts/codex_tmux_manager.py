@@ -24,6 +24,15 @@ DEFAULT_WORKER_MODEL = os.environ.get("CODEX_WORKER_DEFAULT_MODEL", "gpt-5.5")
 DEFAULT_WORKER_REASONING = os.environ.get("CODEX_WORKER_DEFAULT_REASONING", "xhigh")
 MANAGER_PATH = Path(__file__).resolve()
 HEALTH_SUPERVISOR_PATH = MANAGER_PATH.with_name("codex_tmux_health_supervisor.py")
+EVENT_ROTATE_MAX_BYTES = 1_000_000
+EVENT_ROTATE_KEEP_LINES = 500
+REGISTRY_COMPACT_MAX_BYTES = 1_000_000
+REGISTRY_COMPACT_WORKER_THRESHOLD = 128
+REGISTRY_RECENT_TERMINAL_LIMIT = 32
+SCHEDULE_RECENT_TERMINAL_LIMIT = 12
+CONSULT_RECENT_TERMINAL_LIMIT = 8
+HANDOFF_RECENT_TERMINAL_LIMIT = 8
+TERMINAL_WORKER_STATES = {"stopped", "completed", "failed"}
 
 
 def now_iso() -> str:
@@ -85,6 +94,10 @@ def state_dir(path: str | None) -> Path:
 
 def registry_path(base: Path) -> Path:
     return base / "workers.json"
+
+
+def registry_archive_dir(base: Path) -> Path:
+    return base / "archive" / "registry"
 
 
 def schedule_doc_path(base: Path) -> Path:
@@ -169,8 +182,88 @@ def load_registry(base: Path) -> dict[str, Any]:
     return {"version": 1, "workers": {}}
 
 
+def archive_registry_snapshot(base: Path, registry: dict[str, Any]) -> Path:
+    archive_dir = registry_archive_dir(base)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+    path = archive_dir / f"workers.full.{stamp}.{os.getpid()}.json"
+    path.write_text(json.dumps(registry, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def compact_registry_in_place(
+    base: Path,
+    registry: dict[str, Any],
+    *,
+    recent_terminal_limit: int = REGISTRY_RECENT_TERMINAL_LIMIT,
+) -> dict[str, Any]:
+    workers = registry.get("workers", {})
+    session = registry.get("session_namespace") or registry.get("session", DEFAULT_SESSION)
+    current, recent_terminal = split_current_and_recent_workers(
+        workers,
+        session,
+        recent_terminal_limit=recent_terminal_limit,
+    )
+    keep_names = {name for name, _, _ in current}
+    keep_names.update(name for name, _, _ in recent_terminal)
+    dropped_names = sorted(set(workers) - keep_names)
+    if not dropped_names:
+        return {
+            "changed": False,
+            "archive": None,
+            "before_workers": len(workers),
+            "after_workers": len(workers),
+            "dropped_workers": 0,
+        }
+
+    archive = archive_registry_snapshot(base, registry)
+    registry["workers"] = {name: workers[name] for name in workers if name in keep_names}
+    registry["registry_history"] = {
+        "latest_archive": str(archive),
+        "archived_at": now_iso(),
+        "archived_workers": len(workers),
+        "current_workers": len(registry["workers"]),
+        "dropped_terminal_workers": len(dropped_names),
+        "recent_terminal_limit": recent_terminal_limit,
+        "archive_dir": str(registry_archive_dir(base)),
+    }
+    registry["updated_at"] = now_iso()
+    return {
+        "changed": True,
+        "archive": archive,
+        "before_workers": len(workers),
+        "after_workers": len(registry["workers"]),
+        "dropped_workers": len(dropped_names),
+    }
+
+
+def maybe_compact_registry(base: Path, registry: dict[str, Any]) -> dict[str, Any]:
+    workers = registry.get("workers", {})
+    encoded_size = len(json.dumps(registry, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    if len(workers) <= REGISTRY_COMPACT_WORKER_THRESHOLD and encoded_size <= REGISTRY_COMPACT_MAX_BYTES:
+        return {
+            "changed": False,
+            "archive": None,
+            "before_workers": len(workers),
+            "after_workers": len(workers),
+            "dropped_workers": 0,
+        }
+    return compact_registry_in_place(base, registry)
+
+
+def load_archived_worker(base: Path, name: str) -> dict[str, Any] | None:
+    safe = safe_name(name)
+    for path in sorted(registry_archive_dir(base).glob("workers.full.*.json"), reverse=True):
+        archived = read_json(path, {})
+        worker = archived.get("workers", {}).get(safe)
+        if worker:
+            return worker
+    return None
+
+
 def save_registry(base: Path, registry: dict[str, Any]) -> None:
     base.mkdir(parents=True, exist_ok=True)
+    maybe_compact_registry(base, registry)
     path = registry_path(base)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     tmp.write_text(json.dumps(registry, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
@@ -179,8 +272,7 @@ def save_registry(base: Path, registry: dict[str, Any]) -> None:
 
 def append_manager_log(base: Path, line: str) -> None:
     base.mkdir(parents=True, exist_ok=True)
-    with (base / "manager.log").open("a", encoding="utf-8") as handle:
-        handle.write(f"{now_iso()} {line}\n")
+    append_bounded_text(base / "manager.log", f"{now_iso()} {line}\n")
 
 
 def append_text(path: Path, text: str) -> None:
@@ -192,6 +284,47 @@ def append_text(path: Path, text: str) -> None:
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def rotate_text_log(path: Path, *, max_bytes: int = EVENT_ROTATE_MAX_BYTES, keep_lines: int = EVENT_ROTATE_KEEP_LINES) -> Path | None:
+    if not path.is_file() or path.stat().st_size <= max_bytes:
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    archive_dir = path.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
+    archive = archive_dir / f"{path.stem}.{stamp}.{os.getpid()}{path.suffix}"
+    os.replace(path, archive)
+    retained = text.splitlines()[-keep_lines:]
+    retained_text = "\n".join(retained) + ("\n" if retained else "")
+    retained_max_bytes = max(1, max_bytes // 4)
+    encoded = retained_text.encode("utf-8")
+    if len(encoded) > retained_max_bytes:
+        retained_text = encoded[-retained_max_bytes:].decode("utf-8", errors="ignore")
+        first_newline = retained_text.find("\n")
+        if first_newline >= 0:
+            retained_text = retained_text[first_newline + 1 :]
+        if retained_text and not retained_text.endswith("\n"):
+            retained_text += "\n"
+    write_text(path, retained_text)
+    return archive
+
+
+def append_bounded_text(path: Path, text: str) -> None:
+    append_text(path, text)
+    rotate_text_log(path)
+
+
+def last_jsonl_record(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in reversed(lines):
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -253,7 +386,7 @@ def append_schedule_event(
         "detail": detail,
         "data": data or {},
     }
-    append_text(schedule_events_path(base), json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    append_bounded_text(schedule_events_path(base), json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def load_schedule_events(base: Path, limit: int = 80) -> list[dict[str, Any]]:
@@ -290,7 +423,7 @@ def append_memory_event(
     decision: str = "",
     next_action: str = "",
     reason: str = "",
-) -> None:
+) -> bool:
     record = {
         "timestamp": now_iso(),
         "event": event,
@@ -299,7 +432,23 @@ def append_memory_event(
         "decision": decision,
         "next_action": next_action,
     }
-    append_text(coordinator_memory_events_path(base), json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    path = coordinator_memory_events_path(base)
+    previous = last_jsonl_record(path)
+    strategic_key = (event, reason, decision.strip(), next_action.strip())
+    previous_key = None
+    if previous:
+        previous_key = (
+            previous.get("event", ""),
+            previous.get("reason", ""),
+            str(previous.get("decision", "")).strip(),
+            str(previous.get("next_action", "")).strip(),
+        )
+    if (decision or next_action) and strategic_key == previous_key:
+        return False
+    if not decision and not next_action and previous and previous.get("event") == event and previous.get("reason") == reason and previous.get("note") == note:
+        return False
+    append_bounded_text(path, json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    return True
 
 
 def load_memory_events(base: Path, limit: int = 40) -> list[dict[str, Any]]:
@@ -334,6 +483,8 @@ If a task conflicts with this file, stop and ask the coordinator for a recorded 
 
 - Read this file before starting or resuming work, before launching child workers, and before starting background jobs.
 - Keep coordinator-facing updates concise; write long logs, tables, diffs, TensorBoard output, and transcripts to files and cite paths.
+- Use event-driven adaptive monitoring. Do not write unchanged checkpoints; widen stable wait intervals and tighten only around launch, failure, completion, or decision gates.
+- Keep current-state schedule, compact memory, context pack, consultation context, and coordinator progress bounded. Preserve full history in JSONL events, worker reports, and timestamped archives.
 - Use explicit `--resource` ownership for GPUs, ports, output directories, checkpoints, TensorBoard instances, and long-running jobs.
 - Do not start duplicate training/evaluation/TensorBoard jobs for the same owned output without checking `jobs`, progress, and schedule first.
 - Do not bind dashboards or services to `0.0.0.0` unless the coordinator explicitly authorizes it. Prefer `127.0.0.1`.
@@ -356,7 +507,7 @@ def ensure_constraints_doc(base: Path) -> Path:
 
 
 def append_constraints_event(base: Path, event: str, detail: str, data: dict[str, Any] | None = None) -> None:
-    append_text(
+    append_bounded_text(
         coordinator_constraints_events_path(base),
         json.dumps(
             {
@@ -407,7 +558,7 @@ def render_coordinator_memory(
     path_rows: list[list[str]] = []
     for name, worker in sorted(workers.items()):
         state = effective_state(worker, session)
-        if state == "stopped":
+        if state in TERMINAL_WORKER_STATES:
             continue
         active_rows.append(
             [
@@ -547,7 +698,7 @@ def render_coordinator_context_pack(base: Path, registry: dict[str, Any], *, rea
     rows = []
     for name, worker in sorted(workers.items()):
         state = effective_state(worker, session)
-        if state == "stopped":
+        if state in TERMINAL_WORKER_STATES:
             continue
         rows.append(
             [
@@ -627,20 +778,35 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
     coordinator = registry.get("coordinator") or {}
     mission = registry.get("mission", "未设置")
     session = registry.get("session", DEFAULT_SESSION)
+    current_workers, recent_terminal_workers = split_current_and_recent_workers(
+        workers,
+        session,
+        recent_terminal_limit=HANDOFF_RECENT_TERMINAL_LIMIT,
+    )
     rows = []
-    for name, worker in sorted(workers.items()):
+    for name, worker, state in current_workers:
         rows.append(
             [
                 name,
-                effective_state(worker, session),
+                state,
                 worker.get("worker_kind", "standard"),
                 worker.get("parent_worker") or "main",
                 worker.get("mode", "-"),
                 f"{worker.get('session', session)}:{worker.get('window', '-')}",
                 ", ".join(worker.get("resources", [])) or "-",
-                one_line(extract_markdown_section(Path(worker.get("workplan_file", "")), "Task", 160), 160),
+                one_line(worker_latest_summary(worker, progress_lines=3, report_lines=3, limit=160), 160),
             ]
         )
+    terminal_rows = [
+        [
+            name,
+            state,
+            worker.get("worker_kind", "standard"),
+            worker.get("updated_at") or worker.get("stopped_at") or "-",
+            one_line(worker_latest_summary(worker, progress_lines=2, report_lines=2, limit=140), 140),
+        ]
+        for name, worker, state in recent_terminal_workers
+    ]
 
     events = load_schedule_events(base, 30)
     peer_messages = load_peer_messages(base, 20)
@@ -696,13 +862,15 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
             f"python {MANAGER_PATH} --state-dir {base} consult-context --print",
             "```",
             "",
-            "## Worker Overview",
+            "## Current Worker Overview",
             "",
         ]
     )
     lines.append(markdown_table(["Worker", "状态", "类型", "上级", "模式", "tmux", "资源", "任务摘要"], rows) if rows else "暂无 worker。")
-    lines.extend(["", "## Key Files", ""])
-    for name, worker in sorted(workers.items()):
+    lines.extend(["", "## Recent Terminal Workers", ""])
+    lines.append(markdown_table(["Worker", "状态", "类型", "Updated", "摘要"], terminal_rows) if terminal_rows else "暂无近期 terminal worker。")
+    lines.extend(["", "## Current Worker Key Files", ""])
+    for name, worker, _ in current_workers:
         lines.extend(
             [
                 f"### {name}",
@@ -1004,6 +1172,30 @@ def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def worker_recency_key(worker: dict[str, Any]) -> str:
+    return str(worker.get("updated_at") or worker.get("created_at") or "")
+
+
+def split_current_and_recent_workers(
+    workers: dict[str, Any],
+    session: str,
+    *,
+    recent_terminal_limit: int,
+) -> tuple[list[tuple[str, dict[str, Any], str]], list[tuple[str, dict[str, Any], str]]]:
+    current: list[tuple[str, dict[str, Any], str]] = []
+    terminal: list[tuple[str, dict[str, Any], str]] = []
+    for name, worker in workers.items():
+        state = effective_state(worker, session)
+        item = (name, worker, state)
+        if state in TERMINAL_WORKER_STATES:
+            terminal.append(item)
+        else:
+            current.append(item)
+    current.sort(key=lambda item: (item[2], item[0]))
+    terminal.sort(key=lambda item: worker_recency_key(item[1]), reverse=True)
+    return current, terminal[:recent_terminal_limit]
+
+
 def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
     workers = registry.get("workers", {})
     session = registry.get("session_namespace") or registry.get("session", DEFAULT_SESSION)
@@ -1041,7 +1233,8 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
                 f"- 接管 handoff：`{coordinator.get('handoff_file', coordinator_handoff_path(base))}`",
                 f"- recovery count：{coordinator.get('recovery_count', 0)}",
                 f"- last recovery：{coordinator.get('last_recovery_at', '-')}",
-                f"- 启用自动接管的 health supervisor：`python {MANAGER_PATH} --state-dir {base} --session {session} start-health-supervisor --restart-main-on-context-full --restart-main-when-missing`",
+                f"- 启用自动接管的 health supervisor：`python {MANAGER_PATH} --state-dir {base} --session {session} start-health-supervisor --restart-main-on-context-full`",
+                "- 只有统一约束明确授权在 target 消失时自动重启，才添加 `--restart-main-when-missing`。",
             ]
         )
     else:
@@ -1113,89 +1306,89 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
         ]
     )
 
-    rows = []
-    for name, worker in sorted(workers.items()):
-        status = effective_state(worker, session)
+    current_workers, recent_terminal_workers = split_current_and_recent_workers(
+        workers,
+        session,
+        recent_terminal_limit=SCHEDULE_RECENT_TERMINAL_LIMIT,
+    )
+    current_rows = []
+    for name, worker, status in current_workers:
         task = extract_markdown_section(Path(worker.get("workplan_file", "")), "Task", 180)
-        git_meta = worker.get("git_worktree") or {}
-        branch = git_meta.get("branch", "-") if isinstance(git_meta, dict) else "-"
-        rows.append(
+        current_rows.append(
             [
                 name,
                 status,
                 worker.get("worker_kind", "standard"),
                 worker.get("parent_worker") or "main",
-                worker.get("mode", "-"),
                 f"{worker.get('session', session)}:{worker.get('window', '-')}",
                 ", ".join(worker.get("resources", [])) or "-",
-                f"{worker.get('model', '-')}/{worker.get('reasoning_effort', '-')}",
-                branch,
                 one_line(task, 120),
             ]
         )
-    lines.extend(["## Worker 总表", ""])
-    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "模式", "tmux", "资源", "模型/推理", "Git branch", "任务摘要"], rows) if rows else "暂无 worker。")
+    lines.extend(["## 当前 Worker", ""])
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "tmux", "资源", "任务摘要"], current_rows) if current_rows else "暂无当前 worker。")
     lines.append("")
 
-    lines.extend(["## Worker 明细", ""])
-    for name, worker in sorted(workers.items()):
+    recent_rows = [
+        [
+            name,
+            status,
+            worker.get("updated_at") or worker.get("created_at") or "-",
+            worker.get("report_file", "-"),
+        ]
+        for name, worker, status in recent_terminal_workers
+    ]
+    lines.extend(["## 近期终止 Worker", ""])
+    lines.append(
+        markdown_table(["Worker", "状态", "最近更新时间", "报告"], recent_rows)
+        if recent_rows
+        else "暂无近期终止 worker。"
+    )
+    lines.extend(
+        [
+            "",
+            f"> 当前状态注册表保存在 `{registry_path(base)}`；完整历史快照保存在 `{registry_archive_dir(base)}`，并由 `{schedule_events_path(base)}` 和各 worker report 补充审计证据。",
+            "",
+            "## 当前 Worker 明细",
+            "",
+        ]
+    )
+    for name, worker, status in current_workers:
         status_data = read_status_file(worker) or {}
         jobs = load_jobs(jobs_path_for(base, worker), name).get("jobs", [])
         progress_file = Path(worker.get("progress_file", ""))
         report_file = Path(worker.get("report_file", ""))
         workplan_file = Path(worker.get("workplan_file", ""))
-        cwd = Path(worker.get("cwd", "."))
-        git_meta = worker.get("git_worktree") or {}
         lines.extend(
             [
                 f"### {name}",
                 "",
-                f"- 状态：`{effective_state(worker, session)}`",
-                f"- 类型：`{worker.get('worker_kind', 'standard')}`",
-                f"- 上级 worker：`{worker.get('parent_worker') or 'main-coordinator'}`",
-                f"- 启动时间：{worker.get('created_at', '-')}",
-                f"- 更新时间：{worker.get('updated_at', '-')}",
+                f"- 状态：`{status}`",
+                f"- 类型/上级：`{worker.get('worker_kind', 'standard')}` / `{worker.get('parent_worker') or 'main-coordinator'}`",
                 f"- tmux：`{worker.get('session', session)}:{worker.get('window', '-')}`",
-                f"- model：`{worker.get('model', '-')}`",
-                f"- reasoning effort：`{worker.get('reasoning_effort', '-')}`",
-                f"- 工作目录：`{worker.get('cwd', '-')}`",
-                f"- owned paths：{', '.join(worker.get('owned_paths', [])) or '-'}",
                 f"- resources：{', '.join(worker.get('resources', [])) or '-'}",
-                f"- manager scope：{', '.join(worker.get('manager_scope', [])) or '-'}",
+                f"- owned paths：{', '.join(worker.get('owned_paths', [])) or '-'}",
                 f"- workplan：`{workplan_file}`",
                 f"- progress：`{progress_file}`",
                 f"- report：`{report_file}`",
-                f"- inbox：`{worker.get('inbox_dir', '-')}`",
                 f"- jobs：`{worker.get('jobs_file', '-')}`",
+                f"- 当前任务摘要：{extract_markdown_section(workplan_file, 'Task', 260)}",
+                f"- 最新进展/报告摘要：{worker_latest_summary(worker, progress_lines=4, report_lines=4, limit=360)}",
             ]
         )
-        if isinstance(git_meta, dict) and git_meta:
-            lines.extend(
-                [
-                    f"- git root：`{git_meta.get('git_root', '-')}`",
-                    f"- git worktree：`{git_meta.get('worktree_path', '-')}`",
-                    f"- git branch：`{git_meta.get('branch', '-')}`",
-                    f"- base ref：`{git_meta.get('base_ref', '-')}`",
-                ]
-            )
-        if status_data:
-            lines.append(f"- status json：`{worker.get('status_file', '-')}`")
-            if status_data.get("stalled_seconds") is not None:
-                lines.append(f"- stalled seconds：{status_data.get('stalled_seconds')}")
-        lines.extend(["", "#### 任务", "", extract_markdown_section(workplan_file, "Task", 800), ""])
-        lines.extend(["#### 调度和资源", ""])
-        lines.append(extract_markdown_section(workplan_file, "Resources", 500))
+        if status_data.get("stalled_seconds") is not None:
+            lines.append(f"- stalled seconds：{status_data.get('stalled_seconds')}")
+        if jobs:
+            lines.append("- 后台 jobs：" + "；".join(one_line(job_line(job), 220) for job in jobs[:8]))
         lines.append("")
-        lines.append(extract_markdown_section(workplan_file, "Owned Paths", 500))
-        lines.append("")
-        lines.extend(["#### 后台 Jobs", ""])
-        lines.append("\n".join(job_line(job) for job in jobs) if jobs else "无已登记后台 job。")
-        lines.extend(["", "#### 最新进展摘录", "", "```text", tail_text(progress_file, 18), "```", ""])
-        lines.extend(["#### 最新报告摘录", "", "```text", tail_text(report_file, 18), "```", ""])
-        if cwd.exists():
-            lines.extend(["#### Git 摘要", "", "```text", git_summary(cwd), "```", ""])
+    lines.extend(
+        [
+            "> Schedule 不再为每个 worker 嵌入完整 progress/report、任务正文或重复 Git status/diff。需要深挖时按证据路径读取；Git 审查使用 `collect` 或显式 `git status/diff`。",
+            "",
+        ]
+    )
 
-    events = load_schedule_events(base, 40)
+    events = load_schedule_events(base, 24)
     lines.extend(["## 调度事件日志", ""])
     if events:
         event_rows = [
@@ -1211,7 +1404,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
     else:
         lines.append("暂无调度事件。")
 
-    peer_messages = load_peer_messages(base, 30)
+    peer_messages = load_peer_messages(base, 12)
     lines.extend(["", "## Worker 横向消息", ""])
     if peer_messages:
         peer_rows = [
@@ -1249,19 +1442,22 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
     session = registry.get("session", DEFAULT_SESSION)
     mission = registry.get("mission", "未设置")
     coordinator = registry.get("coordinator") or {}
+    current_workers, recent_terminal_workers = split_current_and_recent_workers(
+        workers,
+        session,
+        recent_terminal_limit=CONSULT_RECENT_TERMINAL_LIMIT,
+    )
     rows = []
-    for name, worker in sorted(workers.items()):
+    for name, worker, state in current_workers:
         rows.append(
             [
                 name,
-                effective_state(worker, session),
+                state,
                 worker.get("worker_kind", "standard"),
                 worker.get("parent_worker") or "main",
-                worker.get("mode", "-"),
                 f"{worker.get('session', session)}:{worker.get('window', '-')}",
-                f"{worker.get('model', '-')}/{worker.get('reasoning_effort', '-')}",
                 ", ".join(worker.get("resources", [])) or "-",
-                one_line(extract_markdown_section(Path(worker.get("workplan_file", "")), "Task", 140), 140),
+                one_line(worker_latest_summary(worker, progress_lines=3, report_lines=3, limit=180), 180),
             ]
         )
 
@@ -1302,9 +1498,15 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         "## Worker 总览",
         "",
     ]
-    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "模式", "tmux", "模型/推理", "资源", "任务摘要"], rows) if rows else "暂无 worker。")
-    lines.extend(["", "## 关键文件", ""])
-    for name, worker in sorted(workers.items()):
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "tmux", "资源", "最新摘要"], rows) if rows else "暂无当前 worker。")
+    recent_rows = [
+        [name, state, worker.get("updated_at") or worker.get("created_at") or "-", worker.get("report_file", "-")]
+        for name, worker, state in recent_terminal_workers
+    ]
+    lines.extend(["", "## 近期终止 Worker", ""])
+    lines.append(markdown_table(["Worker", "状态", "最近更新时间", "报告"], recent_rows) if recent_rows else "暂无近期终止 worker。")
+    lines.extend(["", "## 当前 Worker 关键文件", ""])
+    for name, worker, _ in current_workers:
         lines.extend(
             [
                 f"### {name}",
@@ -1318,8 +1520,15 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
                 "",
             ]
         )
-    lines.extend(["## 最近调度事件", ""])
-    events = load_schedule_events(base, 30)
+    lines.extend(
+        [
+            f"当前 worker 注册表：`{registry_path(base)}`；完整历史快照：`{registry_archive_dir(base)}`。当前咨询上下文不展开全部终止 worker。",
+            "",
+            "## 最近调度事件",
+            "",
+        ]
+    )
+    events = load_schedule_events(base, 18)
     if events:
         lines.append(
             markdown_table(
@@ -1329,17 +1538,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         )
     else:
         lines.append("暂无调度事件。")
-    lines.extend(
-        [
-            "",
-            "## 调度总览摘录",
-            "",
-            "```text",
-            tail_text(schedule_doc_path(base), 100),
-            "```",
-            "",
-        ]
-    )
+    lines.extend(["", "## 主进程短上下文摘录", "", "```text", tail_text(coordinator_context_pack_path(base), 60), "```", ""])
     return "\n".join(lines)
 
 
@@ -2521,6 +2720,19 @@ def resolve_worker(base: Path, name: str) -> tuple[dict[str, Any], dict[str, Any
     return registry, worker
 
 
+def resolve_worker_with_archive(base: Path, name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    registry = load_registry(base)
+    safe = safe_name(name)
+    worker = registry.get("workers", {}).get(safe)
+    if worker:
+        return registry, worker
+    worker = load_archived_worker(base, safe)
+    if not worker:
+        raise SystemExit(f"unknown worker: {name}")
+    registry.setdefault("workers", {})[safe] = worker
+    return registry, worker
+
+
 def cmd_job_add(args: argparse.Namespace) -> None:
     base = state_dir(args.state_dir)
     registry, worker = resolve_worker(base, args.worker)
@@ -2614,7 +2826,8 @@ def prune_old_files(directory: Path, keep: int) -> None:
         old.unlink(missing_ok=True)
 
 
-def supervise_once(base: Path, registry: dict[str, Any], args: argparse.Namespace, last_query: dict[str, float]) -> None:
+def supervise_once(base: Path, registry: dict[str, Any], args: argparse.Namespace, last_query: dict[str, float]) -> bool:
+    meaningful_change = False
     for name, worker in sorted(registry.get("workers", {}).items()):
         session = worker.get("session", args.session)
         window = worker.get("window", "")
@@ -2630,10 +2843,13 @@ def supervise_once(base: Path, registry: dict[str, Any], args: argparse.Namespac
         previous_state = status_data.get("state")
         capture_changed = status_data.get("capture_hash") != capture_hash
         if capture_changed:
+            meaningful_change = True
             status_data["last_change_at"] = stamp
             status_data["last_change_ts"] = now_ts
         last_change_ts = float(status_data.get("last_change_ts", now_ts))
         state = "stalled" if now_ts - last_change_ts >= args.stall_seconds else "running"
+        if state != previous_state:
+            meaningful_change = True
         status_data.update(
             {
                 "state": state,
@@ -2652,7 +2868,7 @@ def supervise_once(base: Path, registry: dict[str, Any], args: argparse.Namespac
 
         last_progress_append_ts = float(status_data.get("last_progress_append_ts", 0))
         progress_due = now_ts - last_progress_append_ts >= args.progress_append_interval
-        should_append_progress = capture_changed or state != previous_state or progress_due or args.once
+        should_append_progress = capture_changed or state != previous_state or progress_due
         if should_append_progress:
             status_data["last_progress_append_at"] = stamp
             status_data["last_progress_append_ts"] = now_ts
@@ -2675,6 +2891,7 @@ def supervise_once(base: Path, registry: dict[str, Any], args: argparse.Namespac
             query = args.query_prompt
             send_prompt(target, query, escape_first=args.query_escape_first)
             last_query[name] = time.time()
+            meaningful_change = True
             append_manager_log(base, f"supervise-query name={name} chars={len(query)}")
             time.sleep(args.response_wait)
             response = capture_target(target, args.lines)
@@ -2690,6 +2907,7 @@ def supervise_once(base: Path, registry: dict[str, Any], args: argparse.Namespac
             if args.continue_prompt:
                 send_prompt(target, args.continue_prompt)
                 append_manager_log(base, f"supervise-continue name={name} chars={len(args.continue_prompt)}")
+    return meaningful_change
 
 
 def cmd_supervise(args: argparse.Namespace) -> None:
@@ -2699,7 +2917,14 @@ def cmd_supervise(args: argparse.Namespace) -> None:
             "Refusing to run an unbounded supervisor loop in the foreground. "
             "Use start-supervisor to run it in tmux, or pass --allow-foreground-loop only from a managed tmux target."
         )
-    print(f"supervising state_dir={base} session={args.session} interval={args.interval}")
+    base_interval = max(1, args.interval)
+    max_interval = max(base_interval, min(max(1, args.refresh_schedule_interval), 7200))
+    current_interval = base_interval
+    stable_cycles = 0
+    print(
+        f"supervising state_dir={base} session={args.session} "
+        f"base_interval={base_interval} max_interval={max_interval}"
+    )
     last_query: dict[str, float] = {}
     started_at = now_iso()
     last_schedule_refresh_ts = 0.0
@@ -2709,6 +2934,25 @@ def cmd_supervise(args: argparse.Namespace) -> None:
             cycle += 1
             registry = load_registry(base)
             loop_stamp = now_iso()
+            cycle_changed = supervise_once(base, registry, args, last_query)
+            if cycle_changed:
+                if current_interval != base_interval:
+                    append_manager_log(
+                        base,
+                        f"supervise-cadence reset interval={base_interval} reason=meaningful-change",
+                    )
+                current_interval = base_interval
+                stable_cycles = 0
+            else:
+                stable_cycles += 1
+                if stable_cycles >= 2 and current_interval < max_interval:
+                    previous_interval = current_interval
+                    current_interval = min(max_interval, current_interval * 2)
+                    stable_cycles = 0
+                    append_manager_log(
+                        base,
+                        f"supervise-cadence widen from={previous_interval} to={current_interval} reason=two-unchanged-cycles",
+                    )
             write_text(
                 supervisor_status_path(base),
                 json.dumps(
@@ -2719,7 +2963,11 @@ def cmd_supervise(args: argparse.Namespace) -> None:
                         "started_at": started_at,
                         "last_loop_at": loop_stamp,
                         "cycle": cycle,
-                        "interval": args.interval,
+                        "interval": current_interval,
+                        "base_interval": base_interval,
+                        "max_interval": max_interval,
+                        "stable_cycles": stable_cycles,
+                        "last_cycle_changed": cycle_changed,
                         "once": args.once,
                     },
                     indent=2,
@@ -2728,14 +2976,13 @@ def cmd_supervise(args: argparse.Namespace) -> None:
                 )
                 + "\n",
             )
-            supervise_once(base, registry, args, last_query)
             now_ts = time.time()
             if args.once or now_ts - last_schedule_refresh_ts >= args.refresh_schedule_interval:
                 refresh_schedule_doc(base, load_registry(base))
                 last_schedule_refresh_ts = now_ts
             if args.once:
                 break
-            time.sleep(args.interval)
+            time.sleep(current_interval)
     finally:
         write_text(
             supervisor_status_path(base),
@@ -2747,6 +2994,9 @@ def cmd_supervise(args: argparse.Namespace) -> None:
                     "started_at": started_at,
                     "exited_at": now_iso(),
                     "cycle": cycle,
+                    "base_interval": base_interval,
+                    "max_interval": max_interval,
+                    "last_interval": current_interval,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -2779,6 +3029,7 @@ def start_supervisor_window(
     if window_exists(session, window):
         print(f"supervisor already present at {session}:{window}")
         return
+    rotate_text_log(base / "logs" / "supervisor.log")
     command = supervisor_command(base, namespace, interval, ask, lines, query_interval, refresh_schedule_interval, progress_append_interval)
     start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     append_manager_log(base, f"start-supervisor session={session} window={window} interval={interval} ask={ask}")
@@ -2840,6 +3091,7 @@ def start_health_supervisor_window(
             return
         stop_tmux_target(session, window, independent_session=not shared_session)
         time.sleep(0.5)
+    rotate_text_log(base / "logs" / "health-supervisor.log")
     command = health_supervisor_command(
         base,
         namespace,
@@ -2931,7 +3183,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     require_binary("codex")
     base = state_dir(args.state_dir)
     constraints_file = ensure_constraints_doc(base)
-    registry, worker = resolve_worker(base, args.name)
+    registry, worker = resolve_worker_with_archive(base, args.name)
     old_target = f"{worker['session']}:{worker['window']}"
     if window_exists(worker["session"], worker["window"]) and not args.force:
         raise SystemExit(f"worker window is still present: {old_target}; use --force only if you intentionally want another window")
@@ -3075,7 +3327,7 @@ def cmd_compact_memory(args: argparse.Namespace) -> None:
         save_registry(base, registry)
     has_note = any([args.note, args.decision, args.next_action, args.mission])
     if has_note:
-        append_memory_event(
+        memory_event_added = append_memory_event(
             base,
             "compact-memory",
             note=args.note or "",
@@ -3083,21 +3335,22 @@ def cmd_compact_memory(args: argparse.Namespace) -> None:
             next_action=args.next_action or "",
             reason=args.reason,
         )
-        append_schedule_event(
-            base,
-            "compact-memory",
-            detail="; ".join(
-                part
-                for part in [
-                    f"reason={args.reason}" if args.reason else "",
-                    f"note={one_line(args.note or '', 120)}" if args.note else "",
-                    f"decision={one_line(args.decision or '', 120)}" if args.decision else "",
-                    f"next={one_line(args.next_action or '', 120)}" if args.next_action else "",
-                    f"mission={one_line(args.mission or '', 120)}" if args.mission else "",
-                ]
-                if part
-            ),
-        )
+        if memory_event_added:
+            append_schedule_event(
+                base,
+                "compact-memory",
+                detail="; ".join(
+                    part
+                    for part in [
+                        f"reason={args.reason}" if args.reason else "",
+                        f"note={one_line(args.note or '', 120)}" if args.note else "",
+                        f"decision={one_line(args.decision or '', 120)}" if args.decision else "",
+                        f"next={one_line(args.next_action or '', 120)}" if args.next_action else "",
+                        f"mission={one_line(args.mission or '', 120)}" if args.mission else "",
+                    ]
+                    if part
+                ),
+            )
     memory_path, context_pack_path = refresh_compact_memory(base, registry, reason=args.reason)
     refresh_consult_context(base, registry)
     write_coordinator_handoff(base, registry, reason=f"compact-memory:{args.reason}")
@@ -3107,6 +3360,37 @@ def cmd_compact_memory(args: argparse.Namespace) -> None:
     else:
         print(f"memory={memory_path}")
         print(f"context_pack={context_pack_path}")
+
+
+def cmd_compact_registry(args: argparse.Namespace) -> None:
+    base = state_dir(args.state_dir)
+    if args.keep_terminal < 0:
+        raise SystemExit("--keep-terminal must be non-negative")
+    registry = load_registry(base)
+    result = compact_registry_in_place(base, registry, recent_terminal_limit=args.keep_terminal)
+    save_registry(base, registry)
+    if result["changed"]:
+        archive = str(result["archive"])
+        append_manager_log(
+            base,
+            f"compact-registry before={result['before_workers']} after={result['after_workers']} "
+            f"dropped={result['dropped_workers']} archive={archive}",
+        )
+        append_schedule_event(
+            base,
+            "compact-registry",
+            detail=(
+                f"Compacted current worker registry from {result['before_workers']} to {result['after_workers']} records; "
+                f"archived full snapshot at {archive}"
+            ),
+        )
+        refresh_schedule_doc(base, registry)
+    print(f"changed={str(result['changed']).lower()}")
+    print(f"before_workers={result['before_workers']}")
+    print(f"after_workers={result['after_workers']}")
+    print(f"dropped_workers={result['dropped_workers']}")
+    print(f"archive={result['archive'] or '-'}")
+    print(f"current_registry={registry_path(base)}")
 
 
 def cmd_constraints(args: argparse.Namespace) -> None:
@@ -3524,11 +3808,11 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--inline-tui", action="store_true", help="Pass Codex --no-alt-screen for inline TUI. Default keeps normal alternate-screen TUI so the bottom prompt/status line stays stable.")
     launch.add_argument("--start-supervisor", action="store_true", help="Start a tmux supervisor target after launch.")
     launch.add_argument("--no-start-supervisor", action="store_true", help="Do not auto-start supervisor for autonomous-experiment workers.")
-    launch.add_argument("--supervisor-interval", type=int, default=300)
+    launch.add_argument("--supervisor-interval", type=int, default=900)
     launch.add_argument("--supervisor-lines", type=int, default=120)
-    launch.add_argument("--supervisor-query-interval", type=int, default=1800)
-    launch.add_argument("--supervisor-refresh-schedule-interval", type=int, default=900)
-    launch.add_argument("--supervisor-progress-append-interval", type=int, default=1800)
+    launch.add_argument("--supervisor-query-interval", type=int, default=3600)
+    launch.add_argument("--supervisor-refresh-schedule-interval", type=int, default=3600)
+    launch.add_argument("--supervisor-progress-append-interval", type=int, default=7200)
     launch.add_argument("--query-interactive", action="store_true", help="Supervisor queries interactive workers, then sends continue.")
     launch.set_defaults(func=cmd_launch)
 
@@ -3595,16 +3879,16 @@ def build_parser() -> argparse.ArgumentParser:
     job_stop.set_defaults(func=cmd_job_stop)
 
     supervise = sub.add_parser("supervise", help="Run a supervisor loop that captures workers and optionally queries interactive workers.")
-    supervise.add_argument("--interval", type=int, default=300)
+    supervise.add_argument("--interval", type=int, default=900)
     supervise.add_argument("--lines", type=int, default=120)
     supervise.add_argument("--once", action="store_true")
     supervise.add_argument("--allow-foreground-loop", action="store_true", help=argparse.SUPPRESS)
-    supervise.add_argument("--refresh-schedule-interval", type=int, default=900, help="Seconds between heavy schedule/context refreshes in loop mode.")
-    supervise.add_argument("--progress-append-interval", type=int, default=1800, help="Seconds between unchanged supervisor progress entries.")
+    supervise.add_argument("--refresh-schedule-interval", type=int, default=3600, help="Seconds between heavy schedule/context refreshes in loop mode.")
+    supervise.add_argument("--progress-append-interval", type=int, default=7200, help="Seconds between unchanged supervisor progress entries.")
     supervise.add_argument("--query-interactive", action="store_true")
     supervise.add_argument("--query-any-running", action="store_false", dest="query_only_stalled", help="Allow supervisor queries to running interactive workers, not only stalled ones.")
     supervise.add_argument("--query-escape-first", action="store_true", help="Send Escape before supervisor query prompts.")
-    supervise.add_argument("--query-interval", type=int, default=1800)
+    supervise.add_argument("--query-interval", type=int, default=3600)
     supervise.add_argument("--response-wait", type=int, default=45)
     supervise.add_argument("--capture-retention", type=int, default=200)
     supervise.add_argument("--stall-seconds", type=int, default=1800)
@@ -3614,11 +3898,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     start_supervisor = sub.add_parser("start-supervisor", help="Start the supervisor loop in a tmux target.")
     start_supervisor.add_argument("--cwd", default=os.getcwd())
-    start_supervisor.add_argument("--interval", type=int, default=300)
+    start_supervisor.add_argument("--interval", type=int, default=900)
     start_supervisor.add_argument("--lines", type=int, default=120)
-    start_supervisor.add_argument("--query-interval", type=int, default=1800)
-    start_supervisor.add_argument("--refresh-schedule-interval", type=int, default=900)
-    start_supervisor.add_argument("--progress-append-interval", type=int, default=1800)
+    start_supervisor.add_argument("--query-interval", type=int, default=3600)
+    start_supervisor.add_argument("--refresh-schedule-interval", type=int, default=3600)
+    start_supervisor.add_argument("--progress-append-interval", type=int, default=7200)
     start_supervisor.add_argument("--query-interactive", action="store_true")
     start_supervisor.set_defaults(func=cmd_start_supervisor)
 
@@ -3676,6 +3960,15 @@ def build_parser() -> argparse.ArgumentParser:
     compact_memory.add_argument("--print", action="store_true", help="Print the refreshed memory file.")
     compact_memory.add_argument("--context-pack", action="store_true", help="With --print, print the shorter context pack instead of full compact memory.")
     compact_memory.set_defaults(func=cmd_compact_memory)
+
+    compact_registry = sub.add_parser("compact-registry", help="Archive the full registry and keep only current plus recent terminal workers.")
+    compact_registry.add_argument(
+        "--keep-terminal",
+        type=int,
+        default=REGISTRY_RECENT_TERMINAL_LIMIT,
+        help=f"Number of recent terminal workers to keep in workers.json; default {REGISTRY_RECENT_TERMINAL_LIMIT}.",
+    )
+    compact_registry.set_defaults(func=cmd_compact_registry)
 
     constraints = sub.add_parser("constraints", help="View or update unified coordinator constraints loaded by all launched Codex processes.")
     constraints.add_argument("--print", action="store_true", help="Print the constraints file after any update.")
