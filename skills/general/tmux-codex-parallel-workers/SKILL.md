@@ -87,6 +87,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Give each branch manager a clear mission, `--manager-scope`, resource envelope, and allowed write/output roots.
    - Branch managers may launch child workers with `--parent-worker <branch-manager>` and coordinate their reports, jobs, and peer messages.
    - Branch managers must remain responsive between events. They must not use manager-owned long `sleep`, blocking terminal waits, or dense polling loops as a scheduler; record the next gate, return idle, and rely on peer completion/failure messages plus the normal supervisor.
+   - Require child workers to use `peer-send ... --notify` for terminal completion, accepted handoff, failure, unexpected termination, and resource-release events. Keep routine health/checkpoint messages non-notifying so event-driven coordination does not become prompt spam.
    - Branch managers produce branch-level progress/report summaries for the main coordinator; they do not own final merge, promotion, cross-branch resource decisions, or user-facing conclusions unless explicitly delegated.
 13. Allow front-line worker communication only through manager-mediated messages.
    - Use `peer-send <source> <target> --message ...` or `--message-file ...`.

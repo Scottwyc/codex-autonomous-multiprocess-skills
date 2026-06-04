@@ -152,6 +152,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - Give it a concrete branch mission, `--manager-scope`, resources, owned output roots, and the expected branch-level report.
    - The branch manager may launch child workers with `--parent-worker <branch-manager>`, usually `--worker-kind autonomous-experiment`.
    - The branch manager may use `peer-send` to allow front-line workers to exchange short evidence, blockers, and artifact paths.
+   - Keep routine health/checkpoint peer messages non-notifying. Require terminal completion, accepted handoff, failure, unexpected termination, and resource-release messages to notify the branch manager so it can remain idle yet respond promptly.
    - The main coordinator should inspect the branch manager's progress/report and schedule notes first, then drill into child workers only when there is a failure, integration decision, or user audit request.
 8. Assign every worker:
    - objective
@@ -186,6 +187,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - coordinate front-line worker peer messages and resource use inside the assigned scope;
    - maintain branch-level progress/report summaries;
    - remain responsive between events; do not run long manager-owned sleeps, polling loops, or blocking waits;
+   - require terminal or resource-release peer messages to wake the manager while leaving routine health messages non-notifying;
    - escalate final decisions and cross-branch conflicts to the main coordinator.
 21. Use front-line workers as execution planes:
    - launch/monitor assigned experiments;
