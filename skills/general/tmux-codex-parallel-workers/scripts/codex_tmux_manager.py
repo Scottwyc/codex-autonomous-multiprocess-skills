@@ -160,6 +160,10 @@ def coordinator_constraints_path(base: Path) -> Path:
     return base / "COORDINATOR_CONSTRAINTS.md"
 
 
+def coordinator_constraints_archive_dir(base: Path) -> Path:
+    return base / "archive" / "constraints"
+
+
 def coordinator_constraints_events_path(base: Path) -> Path:
     return base / "coordinator_constraints_events.jsonl"
 
@@ -820,6 +824,27 @@ def ensure_constraints_doc(base: Path) -> Path:
             json.dumps({"timestamp": now_iso(), "event": "init-default-constraints", "detail": str(path)}, ensure_ascii=False, sort_keys=True) + "\n",
         )
     return path
+
+
+def archive_constraints_snapshot(base: Path, path: Path | None = None) -> Path | None:
+    current = path or coordinator_constraints_path(base)
+    if not current.is_file():
+        return None
+    archive_dir = coordinator_constraints_archive_dir(base)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+    archive = archive_dir / f"COORDINATOR_CONSTRAINTS.full.{stamp}.{os.getpid()}.md"
+    archive.write_bytes(current.read_bytes())
+    return archive
+
+
+def replace_constraints_doc(base: Path, text: str) -> Path | None:
+    path = ensure_constraints_doc(base)
+    if path.read_text(encoding="utf-8", errors="replace") == text:
+        return None
+    archive = archive_constraints_snapshot(base, path)
+    write_text(path, text)
+    return archive
 
 
 def append_constraints_event(base: Path, event: str, detail: str, data: dict[str, Any] | None = None) -> None:
@@ -4019,15 +4044,27 @@ def cmd_constraints(args: argparse.Namespace) -> None:
     path = ensure_constraints_doc(base)
     changed = False
     if args.reset_defaults:
-        write_text(path, default_constraints_text())
-        append_constraints_event(base, "reset-defaults", f"Reset constraints to defaults at {path}")
-        append_schedule_event(base, "constraints", detail="Reset unified coordinator constraints to defaults.")
+        archive = replace_constraints_doc(base, default_constraints_text())
+        archive_note = f"; archived previous live constraints at {archive}" if archive else ""
+        append_constraints_event(
+            base,
+            "reset-defaults",
+            f"Reset constraints to defaults at {path}{archive_note}",
+            {"archive": str(archive) if archive else None},
+        )
+        append_schedule_event(base, "constraints", detail=f"Reset unified coordinator constraints to defaults{archive_note}.")
         changed = True
     if args.set_file:
         source = Path(args.set_file).expanduser().resolve()
-        write_text(path, source.read_text(encoding="utf-8"))
-        append_constraints_event(base, "set-file", f"Replaced constraints from {source}", {"source": str(source)})
-        append_schedule_event(base, "constraints", detail=f"Replaced unified coordinator constraints from {source}.")
+        archive = replace_constraints_doc(base, source.read_text(encoding="utf-8"))
+        archive_note = f"; archived previous live constraints at {archive}" if archive else ""
+        append_constraints_event(
+            base,
+            "set-file",
+            f"Replaced constraints from {source}{archive_note}",
+            {"source": str(source), "archive": str(archive) if archive else None},
+        )
+        append_schedule_event(base, "constraints", detail=f"Replaced unified coordinator constraints from {source}{archive_note}.")
         changed = True
     updates: list[str] = []
     for item in args.append or []:
@@ -4673,8 +4710,8 @@ def build_parser() -> argparse.ArgumentParser:
     constraints = sub.add_parser("constraints", help="View or update unified coordinator constraints loaded by all launched Codex processes.")
     constraints.add_argument("--print", action="store_true", help="Print the constraints file after any update.")
     constraints.add_argument("--append", action="append", help="Append one coordinator-wide constraint bullet. Repeatable.")
-    constraints.add_argument("--set-file", help="Replace constraints with the contents of this Markdown file.")
-    constraints.add_argument("--reset-defaults", action="store_true", help="Reset constraints to the built-in defaults.")
+    constraints.add_argument("--set-file", help="Replace live constraints from this Markdown file and archive the previous live version.")
+    constraints.add_argument("--reset-defaults", action="store_true", help="Archive the previous live constraints and reset to built-in defaults.")
     constraints.add_argument("--tensorboard-port-range", help="Append/update a TensorBoard/dashboard safe port range constraint, for example 16006-16099.")
     constraints.set_defaults(func=cmd_constraints)
 

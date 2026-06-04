@@ -31,7 +31,8 @@
   |     |-- .codex/tmux-workers/
   |           |-- workers.json             -> bounded current-state worker registry
   |           |-- archive/registry/        -> registry 压缩前的完整快照
-  |           |-- COORDINATOR_CONSTRAINTS.md -> 所有子进程优先加载的统一约束
+  |           |-- COORDINATOR_CONSTRAINTS.md -> 所有子进程优先加载的当前有效统一约束
+  |           |-- archive/constraints/       -> 被替换约束的原样历史版本
   |           |-- COORDINATOR_CONTEXT_PACK.md -> 主进程最短上下文包
   |           |-- COORDINATOR_MEMORY.md    -> 主进程压缩工作记忆
   |           |-- COORDINATOR_SCHEDULE.md  -> 主进程调度总览文档
@@ -230,7 +231,17 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   constraints --append "所有 TensorBoard 必须绑定 127.0.0.1，并用 --resource port:<PORT> 记录端口所有权。"
 ```
 
-manager 会把这个约束文件写进 worker plan、worker prompt、resume prompt、branch-manager prompt、consult prompt 和 recovered coordinator prompt。worker 启动时会先收到“先读统一约束，再读任务 prompt”的指令。
+`COORDINATOR_CONSTRAINTS.md` 是当前有效规则视图，不是追加式历史日志。主进程、资源所有权、任务授权或覆盖规则发生替换后，应生成一份只含当前有效规则的简洁文件，再执行：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers \
+  constraints --set-file /path/to/concise-current-constraints.md
+```
+
+manager 会先把旧 live 约束原样归档到 `archive/constraints/`，再替换当前文件。不要依赖持续 `--append` 保存历史；完整更新事件保留在 `coordinator_constraints_events.jsonl`。
+
+manager 会把 live 约束文件写进 worker plan、worker prompt、resume prompt、branch-manager prompt、consult prompt 和 recovered coordinator prompt。worker 启动时会先收到“先读统一约束，再读任务 prompt”的指令。
 
 推荐的信息流是：
 
