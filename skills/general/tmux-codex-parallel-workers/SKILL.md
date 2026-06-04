@@ -86,6 +86,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Start them with `launch <name> --worker-kind branch-manager`; they default to visible interactive mode and supervisor like autonomous experiment workers.
    - Give each branch manager a clear mission, `--manager-scope`, resource envelope, and allowed write/output roots.
    - Branch managers may launch child workers with `--parent-worker <branch-manager>` and coordinate their reports, jobs, and peer messages.
+   - Branch managers must remain responsive between events. They must not use manager-owned long `sleep`, blocking terminal waits, or dense polling loops as a scheduler; record the next gate, return idle, and rely on peer completion/failure messages plus the normal supervisor.
    - Branch managers produce branch-level progress/report summaries for the main coordinator; they do not own final merge, promotion, cross-branch resource decisions, or user-facing conclusions unless explicitly delegated.
 13. Allow front-line worker communication only through manager-mediated messages.
    - Use `peer-send <source> <target> --message ...` or `--message-file ...`.
@@ -93,6 +94,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Peer messages must not silently change another worker's scope, resources, experiment gate, or final decision authority.
 14. Keep watcher and supervisor lifecycle bounded.
    - For periodic monitor/watch workers, keep only the watcher for the current decision gate. Stop and mark the superseded watcher before keeping or launching the next one.
+   - Prefer peer events and the normal supervisor over branch-manager wait loops. Create a dedicated bounded watcher only when a concrete future gate has no event route; it must own no experiment work and must close immediately after reporting that gate.
    - Use one supervisor per state directory. Before starting another, inspect tmux and the supervisor status file and remove or stop duplicates.
    - Use event-driven coordinator updates. Stable unchanged observations should widen the next check interval and should not create schedule, compact-memory, consultation, or progress entries.
    - Use `--dashboard` when the user should be able to inspect current supervisor progress directly in tmux. The dashboard is an ephemeral single-screen view; it must not tighten polling cadence or append unchanged dashboard text to logs or project-management documents.

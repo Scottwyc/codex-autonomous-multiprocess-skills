@@ -47,6 +47,7 @@ After a target is defined:
    - Adapt the interval by progress: start around 5-10 minutes only for launch stabilization or active failure diagnosis; widen to 15-30 minutes after stable progress; widen to 30-120 minutes for long stable jobs or known future gates; tighten again only near a decision boundary, expected completion, regression, or failure.
    - After two consecutive unchanged checks, widen the next interval. After a meaningful change or failure, reset to a shorter interval until stability is re-established.
    - Keep coordinator-side checks short and bounded. Do not run bare `sleep`, `tail -f`, `watch`, foreground training, or unbounded monitor loops in the main Codex process.
+   - Apply the same rule to branch managers and other management workers: do not use a long `sleep` or blocking terminal wait as the scheduler. After recording the next gate, return the Codex pane to a responsive idle state and rely on peer completion/failure messages plus the normal supervisor. Use at most one bounded watcher for an exact future gate when no event route exists, then stop it immediately after the gate.
    - At normal checkpoints, read schedule/progress/report tails and job summaries first. Use short captures only when the summary is insufficient, and load long evidence only for concrete failures, integration review, or explicit user audit.
    - Put persistent monitoring into tmux with `start-supervisor`; use `supervise --once` for coordinator-side spot checks.
    - For long-lived Codex tmux runs, also start `start-health-supervisor` so recoverable network/subprocess stalls in interactive Codex panes are resumed without blocking the coordinator.
@@ -184,6 +185,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - decompose one major branch into child workers;
    - coordinate front-line worker peer messages and resource use inside the assigned scope;
    - maintain branch-level progress/report summaries;
+   - remain responsive between events; do not run long manager-owned sleeps, polling loops, or blocking waits;
    - escalate final decisions and cross-branch conflicts to the main coordinator.
 21. Use front-line workers as execution planes:
    - launch/monitor assigned experiments;

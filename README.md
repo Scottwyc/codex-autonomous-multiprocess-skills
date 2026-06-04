@@ -18,7 +18,7 @@ Together, the two skills form an autonomous multiprocess management framework: a
 
 The framework also treats the coordinator context window as a limited resource. Worker progress, reports, schedule docs, consultation answers, and supervisor captures are designed to summarize first and point to files for long logs, full diffs, large tables, and tmux transcripts.
 
-Recent scheduling defaults make this explicit: coordinator checkpoints are event-driven, stable unchanged runs back off automatically, superseded watch windows are closed, and temporary management files are bounded current-state views rather than ever-growing history. The manager archives full history before compacting `workers.json`, rotates event/supervisor logs, and exposes `compact-registry` for older state directories.
+Recent scheduling defaults make this explicit: coordinator checkpoints are event-driven, stable unchanged runs back off automatically, branch managers stay responsive instead of scheduling with long sleeps, superseded watch windows are closed, and temporary management files are bounded current-state views rather than ever-growing history. The manager archives full history before compacting `workers.json`, rotates event/supervisor logs, and exposes `compact-registry` for older state directories.
 
 For large experiment lines, the coordinator can delegate branch-level planning to a `branch-manager` worker. That branch manager can launch front-line `autonomous-experiment` children with `--parent-worker`, coordinate short `peer-send` messages between them, and report branch-level summaries back to the main coordinator.
 
