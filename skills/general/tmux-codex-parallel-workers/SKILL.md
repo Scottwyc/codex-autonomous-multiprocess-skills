@@ -93,6 +93,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Branch managers produce branch-level progress/report summaries for the main coordinator; they do not own final merge, promotion, cross-branch resource decisions, or user-facing conclusions unless explicitly delegated.
 13. Allow front-line worker communication only through manager-mediated messages.
    - Use `peer-send <source> <target> --message ...` or `--message-file ...`.
+   - Use `peer-send <source> main-coordinator --message ... --notify` for terminal completion, failure, accepted handoff, or resource-release evidence. `main`, `main-coordinator`, and `coordinator` resolve only to the registered authoritative coordinator target; the manager writes a concise coordinator inbox message and never creates a replacement main target through this path.
    - Peer messages are for short factual evidence, blockers, dependency notices, and artifact paths.
    - Peer messages must not silently change another worker's scope, resources, experiment gate, or final decision authority.
 14. Keep watcher and supervisor lifecycle bounded.

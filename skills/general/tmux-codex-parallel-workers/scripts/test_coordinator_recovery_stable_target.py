@@ -237,6 +237,56 @@ class HealthSupervisorPolicyTests(unittest.TestCase):
         )
 
 
+class CoordinatorPeerMessageTests(unittest.TestCase):
+    def test_peer_send_main_coordinator_alias_writes_inbox_and_notifies_registered_target(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="codex-coordinator-peer-") as temp:
+            base = Path(temp) / "state"
+            source_progress = base / "progress" / "source-worker.md"
+            manager.save_registry(
+                base,
+                {
+                    "version": 1,
+                    "session": "audit-ns",
+                    "workers": {
+                        "source-worker": {
+                            "name": "source-worker",
+                            "progress_file": str(source_progress),
+                        }
+                    },
+                    "coordinator": {
+                        "role": "main-coordinator",
+                        "target": "audit-main:stable.0",
+                        "cwd": temp,
+                    },
+                },
+            )
+            args = argparse.Namespace(
+                state_dir=str(base),
+                session="audit-ns",
+                source="source-worker",
+                target="main-coordinator",
+                message="Terminal READY: results/report.json",
+                message_file=None,
+                notify=True,
+                escape_first=False,
+                escape_after=False,
+            )
+            with (
+                mock.patch.object(manager, "tmux_target_present", return_value=True),
+                mock.patch.object(manager, "send_prompt") as send_mock,
+                mock.patch.object(manager, "refresh_schedule_doc"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                manager.cmd_peer_send(args)
+
+            inbox_files = list(manager.coordinator_inbox_path(base).glob("*.md"))
+            self.assertEqual(len(inbox_files), 1)
+            self.assertIn("Terminal READY", inbox_files[0].read_text(encoding="utf-8"))
+            send_mock.assert_called_once()
+            self.assertEqual(send_mock.call_args.args[0], "audit-main:stable.0")
+            self.assertIn("main-coordinator", manager.peer_messages_path(base).read_text(encoding="utf-8"))
+
+
 class HistoricalRegistryStopTests(unittest.TestCase):
     def test_stop_resolves_exact_historical_key_before_safe_name(self) -> None:
         with tempfile.TemporaryDirectory(prefix="codex-stop-historical-") as temp:

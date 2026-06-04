@@ -116,6 +116,10 @@ def peer_messages_path(base: Path) -> Path:
     return base / "peer_messages.jsonl"
 
 
+def coordinator_inbox_path(base: Path) -> Path:
+    return base / "inbox" / "main-coordinator"
+
+
 def consult_dir_path(base: Path) -> Path:
     return base / "consult"
 
@@ -2192,6 +2196,12 @@ Send short evidence or dependency messages to another worker with:
 python {MANAGER_PATH} --state-dir {base} --session {session} peer-send {name} <target-worker> --message '<short factual message with evidence paths>'
 ```
 
+Send terminal completion, failure, or resource-release evidence to the registered main coordinator with:
+
+```bash
+python {MANAGER_PATH} --state-dir {base} --session {session} peer-send {name} main-coordinator --message '<concise terminal evidence with artifact paths>' --notify
+```
+
 Peer messages may share evidence, blockers, and coordination facts. They must not unilaterally change another worker's assigned scope, resources, or final decision gate.
 
 ## Branch Manager Instructions
@@ -3114,12 +3124,18 @@ def cmd_peer_send(args: argparse.Namespace) -> None:
     registry = load_registry(base)
     workers = registry.get("workers", {})
     source_name = safe_name(args.source)
-    target_name = safe_name(args.target)
+    requested_target_name = safe_name(args.target)
     source = workers.get(source_name)
-    target_worker = workers.get(target_name)
     if not source:
         raise SystemExit(f"unknown source worker: {args.source}")
-    if not target_worker:
+    coordinator_alias = requested_target_name in {"main", "main-coordinator", "coordinator"}
+    coordinator = registry.get("coordinator") or {}
+    target_name = "main-coordinator" if coordinator_alias else requested_target_name
+    target_worker = workers.get(target_name)
+    if coordinator_alias:
+        if not coordinator.get("target"):
+            raise SystemExit("registered main coordinator target is unavailable")
+    elif not target_worker:
         raise SystemExit(f"unknown target worker: {args.target}")
     if source_name == target_name:
         raise SystemExit("source and target workers must be different.")
@@ -3128,10 +3144,19 @@ def cmd_peer_send(args: argparse.Namespace) -> None:
         message = Path(args.message_file).expanduser().read_text(encoding="utf-8")
     if not message.strip():
         raise SystemExit("Provide a non-empty --message or --message-file.")
+    inbox_target = (
+        {
+            "name": target_name,
+            "inbox_dir": str(coordinator_inbox_path(base)),
+            "progress_file": str(coordinator_log_path(base)),
+        }
+        if coordinator_alias
+        else target_worker
+    )
     inbox_file = write_inbox_message(
-        target_worker,
+        inbox_target,
         message,
-        title="Peer Worker Message",
+        title="Worker To Coordinator Message" if coordinator_alias else "Peer Worker Message",
         source=source_name,
         target=target_name,
     )
@@ -3148,23 +3173,46 @@ def cmd_peer_send(args: argparse.Namespace) -> None:
         Path(source.get("progress_file", base / "progress" / f"{source_name}.md")),
         f"\n- {now_iso()} Peer message sent to `{target_name}`: `{inbox_file}`\n",
     )
-    append_text(
-        Path(target_worker.get("progress_file", base / "progress" / f"{target_name}.md")),
-        f"\n- {now_iso()} Peer message received from `{source_name}`: `{inbox_file}`\n",
-    )
+    if coordinator_alias:
+        append_bounded_text(
+            coordinator_log_path(base),
+            f"{now_iso()} Worker message received from {source_name}: {inbox_file}\n",
+        )
+    else:
+        append_text(
+            Path(target_worker.get("progress_file", base / "progress" / f"{target_name}.md")),
+            f"\n- {now_iso()} Peer message received from `{source_name}`: `{inbox_file}`\n",
+        )
     if args.notify:
-        session = target_worker["session"]
-        window = target_worker["window"]
-        if not window_exists(session, window):
-            print(f"warning: target worker window is not present: {session}:{window}; message written to {inbox_file}", file=sys.stderr)
+        if coordinator_alias:
+            coordinator_target = str(coordinator["target"])
+            if not tmux_target_present(coordinator_target):
+                print(
+                    f"warning: registered main coordinator target is not present: {coordinator_target}; "
+                    f"message written to {inbox_file}",
+                    file=sys.stderr,
+                )
+            else:
+                send_prompt(
+                    coordinator_target,
+                    f"Worker message from {source_name} is available at: {inbox_file}\n"
+                    "Read the concise inbox message at the next safe checkpoint; inspect cited artifacts only when needed.",
+                    escape_first=args.escape_first,
+                    escape_after=args.escape_after,
+                )
         else:
-            send_prompt(
-                f"{session}:{window}",
-                f"Peer message from {source_name} is available at: {inbox_file}\n"
-                "Read it at the next safe checkpoint. Treat it as factual evidence or a dependency notice; do not change assigned scope/resources unless your branch manager or coordinator records a decision.",
-                escape_first=args.escape_first,
-                escape_after=args.escape_after,
-            )
+            session = target_worker["session"]
+            window = target_worker["window"]
+            if not window_exists(session, window):
+                print(f"warning: target worker window is not present: {session}:{window}; message written to {inbox_file}", file=sys.stderr)
+            else:
+                send_prompt(
+                    f"{session}:{window}",
+                    f"Peer message from {source_name} is available at: {inbox_file}\n"
+                    "Read it at the next safe checkpoint. Treat it as factual evidence or a dependency notice; do not change assigned scope/resources unless your branch manager or coordinator records a decision.",
+                    escape_first=args.escape_first,
+                    escape_after=args.escape_after,
+                )
     append_manager_log(base, f"peer-send source={source_name} target={target_name} notify={args.notify} inbox={inbox_file}")
     append_schedule_event(
         base,
@@ -4450,9 +4498,9 @@ def build_parser() -> argparse.ArgumentParser:
     interrupt.add_argument("--via-inbox", action="store_true", help="Write the message into the worker inbox and paste a short read-this-file instruction.")
     interrupt.set_defaults(func=cmd_interrupt_send)
 
-    peer_send = sub.add_parser("peer-send", help="Write a manager-mediated worker-to-worker message.")
+    peer_send = sub.add_parser("peer-send", help="Write a manager-mediated worker or coordinator message.")
     peer_send.add_argument("source", help="Source worker name.")
-    peer_send.add_argument("target", help="Target worker name.")
+    peer_send.add_argument("target", help="Target worker name, or main/main-coordinator/coordinator for the registered coordinator.")
     peer_send.add_argument("--message", default="", help="Short factual peer message.")
     peer_send.add_argument("--message-file", help="Read peer message from file.")
     peer_send.add_argument("--notify", action="store_true", help="Also paste a short read-inbox notice into the target worker tmux pane.")

@@ -154,6 +154,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - The branch manager may launch child workers with `--parent-worker <branch-manager>`, usually `--worker-kind autonomous-experiment`.
    - The branch manager may use `peer-send` to allow front-line workers to exchange short evidence, blockers, and artifact paths.
    - Keep routine health/checkpoint peer messages non-notifying. Require terminal completion, accepted handoff, failure, unexpected termination, and resource-release messages to notify the branch manager so it can remain idle yet respond promptly.
+   - Require terminal branch-level completion, failure, accepted handoff, and final resource release to use `peer-send <source> main-coordinator --notify`; this resolves only to the registered authoritative coordinator and writes a concise coordinator inbox message.
    - The main coordinator should inspect the branch manager's progress/report and schedule notes first, then drill into child workers only when there is a failure, integration decision, or user audit request.
 8. Assign every worker:
    - objective

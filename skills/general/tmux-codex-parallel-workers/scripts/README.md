@@ -76,7 +76,15 @@ python "$MANAGER" \
   peer-send child-a child-b \
   --message "Child A produced artifact path results/child-a/metrics.json for Child B to inspect." \
   --notify
+
+python "$MANAGER" \
+  --state-dir .codex/tmux-workers \
+  peer-send child-a main-coordinator \
+  --message "Terminal READY: report=results/child-a/report.json; resource gpu:0 released." \
+  --notify
 ```
+
+The aliases `main`, `main-coordinator`, and `coordinator` resolve only to the registered authoritative coordinator target. The message is stored under `inbox/main-coordinator/` and in `peer_messages.jsonl`; `--notify` sends only a short read-inbox prompt to the existing registered pane.
 
 If an older interactive worker was launched with inline TUI and the bottom Codex prompt/status line is missing, restart that worker from durable state:
 
