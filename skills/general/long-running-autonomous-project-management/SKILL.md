@@ -51,6 +51,7 @@ After a target is defined:
    - At normal checkpoints, read schedule/progress/report tails and job summaries first. Use short captures only when the summary is insufficient, and load long evidence only for concrete failures, integration review, or explicit user audit.
    - Put persistent monitoring into tmux with `start-supervisor`; use `supervise --once` for coordinator-side spot checks.
    - For long-lived Codex tmux runs, also start `start-health-supervisor` so recoverable network/subprocess stalls in interactive Codex panes are resumed without blocking the coordinator.
+   - Do not conflate their cadence: the ordinary progress supervisor widens after unchanged cycles and resets after meaningful change; the health supervisor retains a fixed conservative interval for timely fault/context-exhaustion detection and prunes normally closed targets.
    - Health supervision follows the current control plane only: monitor the registered main coordinator, non-terminal registered workers, and explicit watch/observe targets; prune normally closed or deregistered target state instead of retaining it as active management context.
 6. Update documents continuously.
    - Maintain a status doc, an experiment log, and an ideas or exploration doc when the project benefits from persistent memory.

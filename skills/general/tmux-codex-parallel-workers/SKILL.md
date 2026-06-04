@@ -104,6 +104,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Prefer peer events and the normal supervisor over branch-manager wait loops. Create a dedicated bounded watcher only when a concrete future gate has no event route; it must own no experiment work and must close immediately after reporting that gate.
    - Use one supervisor per state directory. Before starting another, inspect tmux and the supervisor status file and remove or stop duplicates.
    - Use event-driven coordinator updates. Stable unchanged observations should widen the next check interval and should not create schedule, compact-memory, consultation, or progress entries.
+   - Keep the two supervisor roles distinct. The ordinary worker supervisor captures progress and automatically backs off after unchanged cycles; the health supervisor detects recoverable pane failures/context exhaustion and therefore keeps a fixed conservative cadence while pruning stopped targets.
    - Use `--dashboard` when the user should be able to inspect current supervisor progress directly in tmux. The dashboard is an ephemeral single-screen view; it must not tighten polling cadence or append unchanged dashboard text to logs or project-management documents.
 
 ## Manager Script
