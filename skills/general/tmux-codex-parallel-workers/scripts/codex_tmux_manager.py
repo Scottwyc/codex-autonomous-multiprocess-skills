@@ -3415,6 +3415,22 @@ def supervise_once(base: Path, registry: dict[str, Any], args: argparse.Namespac
     return meaningful_change
 
 
+def next_supervisor_cadence(
+    *,
+    base_interval: int,
+    current_interval: int,
+    max_interval: int,
+    stable_cycles: int,
+    meaningful_change: bool,
+) -> tuple[int, int, str]:
+    if meaningful_change:
+        return base_interval, 0, "reset" if current_interval != base_interval else "hold"
+    next_stable_cycles = stable_cycles + 1
+    if next_stable_cycles >= 2 and current_interval < max_interval:
+        return min(max_interval, current_interval * 2), 0, "widen"
+    return current_interval, min(next_stable_cycles, 2), "hold"
+
+
 def cmd_supervise(args: argparse.Namespace) -> None:
     base = state_dir(args.state_dir)
     if not args.once and not args.allow_foreground_loop:
@@ -3455,24 +3471,25 @@ def cmd_supervise(args: argparse.Namespace) -> None:
                     f"reclaimed_bytes={sum(int(item['reclaimed_bytes']) for item in maintained)}",
                 )
             cycle_changed = supervise_once(base, registry, args, last_query)
-            if cycle_changed:
-                if current_interval != base_interval:
+            previous_interval = current_interval
+            current_interval, stable_cycles, cadence_action = next_supervisor_cadence(
+                base_interval=base_interval,
+                current_interval=current_interval,
+                max_interval=max_interval,
+                stable_cycles=stable_cycles,
+                meaningful_change=cycle_changed,
+            )
+            if cadence_action == "reset":
+                if previous_interval != base_interval:
                     append_manager_log(
                         base,
                         f"supervise-cadence reset interval={base_interval} reason=meaningful-change",
                     )
-                current_interval = base_interval
-                stable_cycles = 0
-            else:
-                stable_cycles += 1
-                if stable_cycles >= 2 and current_interval < max_interval:
-                    previous_interval = current_interval
-                    current_interval = min(max_interval, current_interval * 2)
-                    stable_cycles = 0
-                    append_manager_log(
-                        base,
-                        f"supervise-cadence widen from={previous_interval} to={current_interval} reason=two-unchanged-cycles",
-                    )
+            elif cadence_action == "widen":
+                append_manager_log(
+                    base,
+                    f"supervise-cadence widen from={previous_interval} to={current_interval} reason=two-unchanged-cycles",
+                )
             write_text(
                 supervisor_status_path(base),
                 json.dumps(
