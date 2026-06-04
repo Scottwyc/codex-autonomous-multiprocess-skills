@@ -340,6 +340,15 @@ def save_loop_state(base: Path, data: dict[str, Any]) -> None:
     write_text(base / "status" / "health_supervisor_state.json", json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def prune_loop_state(loop_state: dict[str, Any], targets: list[dict[str, Any]]) -> list[str]:
+    target_states = loop_state.setdefault("targets", {})
+    active_keys = {f"{target['name']}@{target['target']}" for target in targets}
+    removed = sorted(key for key in target_states if key not in active_keys)
+    for key in removed:
+        target_states.pop(key, None)
+    return removed
+
+
 def write_status(base: Path, status: dict[str, Any]) -> None:
     write_text(base / "status" / "health_supervisor.json", json.dumps(status, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -534,6 +543,7 @@ def supervise_once(base: Path, args: argparse.Namespace, loop_state: dict[str, A
     patterns = compile_patterns(DEFAULT_ERROR_PATTERNS + (args.error_pattern or []))
     fatal_patterns = compile_patterns(DEFAULT_FATAL_CONTEXT_PATTERNS + (args.fatal_context_pattern or []))
     targets = load_targets(base, args.session, args)
+    prune_loop_state(loop_state, targets)
     statuses = []
     if not targets:
         log(base, "INFO", "no targets to supervise")

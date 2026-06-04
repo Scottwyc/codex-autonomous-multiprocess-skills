@@ -214,6 +214,28 @@ class HealthSupervisorPolicyTests(unittest.TestCase):
         self.assertEqual([target["name"] for target in targets], ["active-missing"])
         self.assertEqual(targets[0]["target"], "definitely-missing-session:codex")
 
+    def test_prune_loop_state_removes_closed_history_and_keeps_current_missing_target(self) -> None:
+        loop_state = {
+            "targets": {
+                "active-missing@definitely-missing-session:codex": {"last_alive": False},
+                "stopped-worker@also-missing-session:codex": {"last_alive": False},
+            }
+        }
+        targets = [
+            {
+                "name": "active-missing",
+                "target": "definitely-missing-session:codex",
+            }
+        ]
+
+        removed = health.prune_loop_state(loop_state, targets)
+
+        self.assertEqual(removed, ["stopped-worker@also-missing-session:codex"])
+        self.assertEqual(
+            loop_state["targets"],
+            {"active-missing@definitely-missing-session:codex": {"last_alive": False}},
+        )
+
 
 class HistoricalRegistryStopTests(unittest.TestCase):
     def test_stop_resolves_exact_historical_key_before_safe_name(self) -> None:

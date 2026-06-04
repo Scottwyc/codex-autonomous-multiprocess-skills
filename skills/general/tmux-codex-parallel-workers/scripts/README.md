@@ -169,6 +169,8 @@ It waits for a stability window and respects a cooldown before sending a recover
 
 It also monitors the registered main coordinator target unless `--no-coordinator` is passed. Context-window exhaustion is treated as fatal to the old coordinator thread, so auto-recovery requires `--restart-main-on-context-full` and launches a new coordinator via the manager's durable recovery prompt instead of pasting a continuation prompt into the exhausted pane. If the registered coordinator pane disappears outright, `--restart-main-when-missing` enables the same recovery path.
 
+Each cycle rebuilds the active target set from the current coordinator/worker registry plus explicit watch/observe targets. Loop-state entries for normally stopped, closed, or deregistered targets are removed, while currently registered targets whose panes are temporarily missing remain eligible for recovery.
+
 Direct dry-run:
 
 ```bash
