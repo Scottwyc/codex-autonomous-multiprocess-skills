@@ -345,6 +345,17 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   compact-registry
 ```
 
+审计并压缩状态目录中的原始 TUI 转录：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers compact-tui-logs
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers compact-tui-logs --include-active --apply
+```
+
+该命令默认 dry-run，只处理 `.codex/tmux-workers/logs/` 内的 `pipe-pane` TUI 转录，不处理实验/job 日志。已关闭 terminal/orphan 转录按尾部有界保留；活跃转录仅在显式 `--include-active` 时通过重新绑定 `pipe-pane` 安全轮转；仍被进程打开的 orphan 文件会跳过。
+
 注意：普通执行 worker 使用 `workspace-write` sandbox 时，manager 会额外给 Codex CLI 传入：
 
 ```bash

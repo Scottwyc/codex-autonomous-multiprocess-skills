@@ -18,7 +18,7 @@ Together, the two skills form an autonomous multiprocess management framework: a
 
 The framework also treats the coordinator context window as a limited resource. Worker progress, reports, schedule docs, consultation answers, and supervisor captures are designed to summarize first and point to files for long logs, full diffs, large tables, and tmux transcripts.
 
-Recent scheduling defaults make this explicit: coordinator checkpoints are event-driven, stable unchanged runs back off automatically, branch managers stay responsive instead of scheduling with long sleeps, superseded watch windows are closed, and temporary management files are bounded current-state views rather than ever-growing history. The manager archives full history before compacting `workers.json`, rotates event/supervisor logs, and exposes `compact-registry` for older state directories.
+Recent scheduling defaults make this explicit: coordinator checkpoints are event-driven, stable unchanged runs back off automatically, branch managers stay responsive instead of scheduling with long sleeps, superseded watch windows are closed, and temporary management files are bounded current-state views rather than ever-growing history. The manager archives full history before compacting `workers.json`, rotates event/supervisor logs, and bounds raw state-directory TUI transcripts separately from durable experiment/job logs.
 
 For large experiment lines, the coordinator can delegate branch-level planning to a `branch-manager` worker. That branch manager can launch front-line `autonomous-experiment` children with `--parent-worker`, coordinate short `peer-send` messages between them, and report branch-level summaries back to the main coordinator.
 
@@ -371,6 +371,15 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   compact-registry
+```
+
+审计并压缩 `.codex/tmux-workers/logs/` 下的原始 TUI 转录，不触碰实验/job 日志。命令默认只 dry-run；显式 `--apply` 后压缩已关闭的 terminal/orphan 转录，加入 `--include-active` 才会安全重绑并轮转活跃 pane：
+
+```bash
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers compact-tui-logs
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
+  --state-dir .codex/tmux-workers compact-tui-logs --include-active --apply
 ```
 
 注意：普通执行 worker 使用 `workspace-write` sandbox 时，manager 会额外给 Codex CLI 传入：
@@ -1219,6 +1228,7 @@ tmux attach -t cw-branch-a
 - The coordinator should use `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as short working memory, and should run `compact-memory --note ... --decision ... --next-action ...` after meaningful decisions.
 - The coordinator must not create schedule, memory, consultation, or progress entries for unchanged polling cycles.
 - Temporary coordinator documents and `workers.json` are bounded current-state views; complete history belongs in event logs, worker reports, and timestamped archives.
+- Raw `tmux pipe-pane` TUI transcripts under the state directory are replaceable control-plane output and remain bounded; experiment/job logs and accepted reports are durable evidence and are never handled by `compact-tui-logs`.
 - Register tmux-hosted main coordinators with their exact pane target using `register-coordinator` when long autonomous recovery matters. A recovered coordinator must start from `COORDINATOR_RECOVERY.md` and `COORDINATOR_SCHEDULE.md`, not from stale memory, and must preserve the registered target whenever it still exists.
 - Default coordinator checks should start from `compact-memory --print --context-pack`, `list`, `jobs`, and `progress --lines 20`; schedule, collect, larger captures, or raw artifacts are for concrete diagnosis or final review.
 - The health supervisor targets transient Codex pane stalls and, when explicitly enabled, registered-coordinator context exhaustion. It is not a replacement for debugging quota/auth failures, failed tests, merge conflicts, bad metrics, or missing durable project documentation.

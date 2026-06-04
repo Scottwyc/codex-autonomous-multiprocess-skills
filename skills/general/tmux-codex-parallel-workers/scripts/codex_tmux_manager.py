@@ -26,6 +26,10 @@ MANAGER_PATH = Path(__file__).resolve()
 HEALTH_SUPERVISOR_PATH = MANAGER_PATH.with_name("codex_tmux_health_supervisor.py")
 EVENT_ROTATE_MAX_BYTES = 1_000_000
 EVENT_ROTATE_KEEP_LINES = 500
+TUI_LOG_ACTIVE_ROTATE_MAX_BYTES = 50_000_000
+TUI_LOG_CLOSED_MAX_BYTES = 5_000_000
+TUI_LOG_RETAIN_BYTES = 1_000_000
+TUI_LOG_RESERVED_NAMES = {"supervisor.log", "health-supervisor.log"}
 REGISTRY_COMPACT_MAX_BYTES = 1_000_000
 REGISTRY_COMPACT_WORKER_THRESHOLD = 128
 REGISTRY_RECENT_TERMINAL_LIMIT = 32
@@ -313,6 +317,314 @@ def rotate_text_log(path: Path, *, max_bytes: int = EVENT_ROTATE_MAX_BYTES, keep
 def append_bounded_text(path: Path, text: str) -> None:
     append_text(path, text)
     rotate_text_log(path)
+
+
+def bounded_tail_bytes(path: Path, keep_bytes: int) -> bytes:
+    if keep_bytes <= 0 or not path.is_file():
+        return b""
+    size = path.stat().st_size
+    offset = max(0, size - keep_bytes)
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read()
+    if offset > 0:
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data = data[newline + 1 :]
+    return data[-keep_bytes:]
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def open_file_inodes(paths: list[Path]) -> set[tuple[int, int]]:
+    candidates: set[tuple[int, int]] = set()
+    for path in paths:
+        try:
+            stat_result = path.stat()
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        candidates.add((stat_result.st_dev, stat_result.st_ino))
+    if not candidates:
+        return set()
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return set(candidates)
+    opened: set[tuple[int, int]] = set()
+    for pid_dir in proc.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        fd_dir = pid_dir / "fd"
+        try:
+            descriptors = list(fd_dir.iterdir())
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        for descriptor in descriptors:
+            try:
+                stat_result = descriptor.stat()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            inode = (stat_result.st_dev, stat_result.st_ino)
+            if inode in candidates:
+                opened.add(inode)
+                if opened == candidates:
+                    return opened
+    return opened
+
+
+def path_inode(path: Path) -> tuple[int, int] | None:
+    try:
+        stat_result = path.stat()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    return stat_result.st_dev, stat_result.st_ino
+
+
+def compact_closed_tui_log(path: Path, *, max_bytes: int, keep_bytes: int, dry_run: bool) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    before = path.stat().st_size
+    if before <= max_bytes:
+        return None
+    tail = bounded_tail_bytes(path, keep_bytes)
+    if not dry_run:
+        write_bytes_atomic(path, tail)
+    return {
+        "path": str(path),
+        "action": "would-compact" if dry_run else "compacted",
+        "before_bytes": before,
+        "after_bytes": len(tail),
+        "reclaimed_bytes": max(0, before - len(tail)),
+    }
+
+
+def active_tui_log_previous_path(path: Path) -> Path:
+    return path.parent / "archive" / "tui" / f"{path.stem}.previous{path.suffix}"
+
+
+def rotate_active_tui_log(
+    path: Path,
+    target: str,
+    *,
+    max_bytes: int,
+    keep_bytes: int,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    before = path.stat().st_size
+    if before <= max_bytes:
+        return None
+    previous = active_tui_log_previous_path(path)
+    if dry_run:
+        return {
+            "path": str(path),
+            "target": target,
+            "previous_tail": str(previous),
+            "action": "would-rotate-active",
+            "before_bytes": before,
+            "after_bytes": 0,
+            "reclaimed_bytes": max(0, before - keep_bytes),
+        }
+
+    staging = path.with_name(f".{path.name}.rotating.{timestamp_slug()}.{os.getpid()}")
+    os.replace(path, staging)
+    path.touch()
+    try:
+        tmux("pipe-pane", "-t", target, f"cat >> {shlex.quote(str(path))}")
+    except subprocess.CalledProcessError:
+        if path.exists():
+            with staging.open("ab") as destination, path.open("rb") as source:
+                destination.write(source.read())
+            path.unlink()
+        os.replace(staging, path)
+        raise
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        inode = path_inode(staging)
+        if inode is None or inode not in open_file_inodes([staging]):
+            break
+        time.sleep(0.05)
+    staging_inode = path_inode(staging)
+    if staging_inode is not None and staging_inode in open_file_inodes([staging]):
+        raise RuntimeError(f"old tmux pipe did not close after rotation: {staging}")
+
+    tail = bounded_tail_bytes(staging, keep_bytes)
+    write_bytes_atomic(previous, tail)
+    staging.unlink()
+    after = path.stat().st_size if path.exists() else 0
+    return {
+        "path": str(path),
+        "target": target,
+        "previous_tail": str(previous),
+        "action": "rotated-active",
+        "before_bytes": before,
+        "after_bytes": after,
+        "reclaimed_bytes": max(0, before - after - len(tail)),
+    }
+
+
+def tui_log_records(base: Path, registry: dict[str, Any]) -> dict[Path, dict[str, Any]]:
+    records: dict[Path, dict[str, Any]] = {}
+
+    def add_record(name: str, role: str, record: dict[str, Any]) -> None:
+        raw_log = record.get("log_file")
+        if not raw_log:
+            return
+        path = Path(raw_log).expanduser().resolve()
+        target = record.get("target")
+        if not target and record.get("session") and record.get("window"):
+            target = f"{record['session']}:{record['window']}"
+        status = read_status_file(record) or {}
+        records[path] = {
+            "name": name,
+            "role": role,
+            "target": target,
+            "terminal": bool(record.get("stopped_at")) or status.get("state") in TERMINAL_WORKER_STATES,
+        }
+
+    for name, worker in registry.get("workers", {}).items():
+        if worker.get("mode") == "interactive":
+            add_record(name, "worker", worker)
+    coordinator = registry.get("coordinator")
+    if coordinator:
+        add_record("main-coordinator", "coordinator", coordinator)
+    consult = registry.get("consult")
+    if consult:
+        add_record("consult", "consult", consult)
+    return records
+
+
+def compact_tui_logs(
+    base: Path,
+    registry: dict[str, Any],
+    *,
+    active_max_bytes: int = TUI_LOG_ACTIVE_ROTATE_MAX_BYTES,
+    closed_max_bytes: int = TUI_LOG_CLOSED_MAX_BYTES,
+    keep_bytes: int = TUI_LOG_RETAIN_BYTES,
+    include_active: bool = False,
+    include_inactive: bool = False,
+    include_orphans: bool = True,
+    dry_run: bool = True,
+) -> list[dict[str, Any]]:
+    log_dir = base / "logs"
+    if not log_dir.is_dir():
+        return []
+    candidates = sorted(path.resolve() for path in log_dir.glob("*.log") if path.name not in TUI_LOG_RESERVED_NAMES)
+    records = tui_log_records(base, registry)
+    opened = open_file_inodes(candidates) if include_orphans or include_inactive else set()
+    outcomes: list[dict[str, Any]] = []
+
+    for path in candidates:
+        try:
+            size = path.stat().st_size
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        record = records.get(path)
+        inode = path_inode(path)
+        if record:
+            target = str(record.get("target") or "")
+            active = bool(target and tmux_target_present(target))
+            if active:
+                if size <= active_max_bytes:
+                    continue
+                if include_active:
+                    result = rotate_active_tui_log(
+                        path,
+                        target,
+                        max_bytes=active_max_bytes,
+                        keep_bytes=keep_bytes,
+                        dry_run=dry_run,
+                    )
+                    if result:
+                        result.update({"class": "active", "name": record["name"], "role": record["role"]})
+                        outcomes.append(result)
+                else:
+                    outcomes.append(
+                        {
+                            "path": str(path),
+                            "class": "active",
+                            "name": record["name"],
+                            "role": record["role"],
+                            "action": "skipped-active",
+                            "before_bytes": size,
+                            "after_bytes": size,
+                            "reclaimed_bytes": 0,
+                        }
+                    )
+                continue
+            if record["terminal"] or include_inactive:
+                if size <= closed_max_bytes:
+                    continue
+                if inode is not None and inode in opened:
+                    outcomes.append(
+                        {
+                            "path": str(path),
+                            "class": "inactive-open",
+                            "name": record["name"],
+                            "role": record["role"],
+                            "action": "skipped-open",
+                            "before_bytes": size,
+                            "after_bytes": size,
+                            "reclaimed_bytes": 0,
+                        }
+                    )
+                    continue
+                result = compact_closed_tui_log(path, max_bytes=closed_max_bytes, keep_bytes=keep_bytes, dry_run=dry_run)
+                if result:
+                    result.update(
+                        {
+                            "class": "terminal" if record["terminal"] else "inactive",
+                            "name": record["name"],
+                            "role": record["role"],
+                        }
+                    )
+                    outcomes.append(result)
+                continue
+            if size <= closed_max_bytes:
+                continue
+            outcomes.append(
+                {
+                    "path": str(path),
+                    "class": "inactive",
+                    "name": record["name"],
+                    "role": record["role"],
+                    "action": "skipped-inactive",
+                    "before_bytes": size,
+                    "after_bytes": size,
+                    "reclaimed_bytes": 0,
+                }
+            )
+            continue
+
+        if not include_orphans:
+            continue
+        if size <= closed_max_bytes:
+            continue
+        if inode is not None and inode in opened:
+            outcomes.append(
+                {
+                    "path": str(path),
+                    "class": "orphan-open",
+                    "name": path.stem,
+                    "role": "orphan",
+                    "action": "skipped-open",
+                    "before_bytes": size,
+                    "after_bytes": size,
+                    "reclaimed_bytes": 0,
+                }
+            )
+            continue
+        result = compact_closed_tui_log(path, max_bytes=closed_max_bytes, keep_bytes=keep_bytes, dry_run=dry_run)
+        if result:
+            result.update({"class": "orphan", "name": path.stem, "role": "orphan"})
+            outcomes.append(result)
+    return outcomes
 
 
 def last_jsonl_record(path: Path) -> dict[str, Any] | None:
@@ -3109,6 +3421,21 @@ def cmd_supervise(args: argparse.Namespace) -> None:
             cycle += 1
             registry = load_registry(base)
             loop_stamp = now_iso()
+            maintenance = compact_tui_logs(
+                base,
+                registry,
+                include_active=True,
+                include_inactive=False,
+                include_orphans=True,
+                dry_run=False,
+            )
+            maintained = [item for item in maintenance if item["action"] in {"compacted", "rotated-active"}]
+            if maintained:
+                append_manager_log(
+                    base,
+                    f"supervise-tui-log-maintenance files={len(maintained)} "
+                    f"reclaimed_bytes={sum(int(item['reclaimed_bytes']) for item in maintained)}",
+                )
             cycle_changed = supervise_once(base, registry, args, last_query)
             if cycle_changed:
                 if current_interval != base_interval:
@@ -3592,6 +3919,53 @@ def cmd_compact_registry(args: argparse.Namespace) -> None:
     print(f"current_registry={registry_path(base)}")
 
 
+def cmd_compact_tui_logs(args: argparse.Namespace) -> None:
+    if args.max_bytes <= 0:
+        raise SystemExit("--max-bytes must be positive")
+    if args.active_max_bytes <= 0:
+        raise SystemExit("--active-max-bytes must be positive")
+    if args.keep_bytes < 0:
+        raise SystemExit("--keep-bytes must be non-negative")
+    base = state_dir(args.state_dir)
+    registry = load_registry(base)
+    outcomes = compact_tui_logs(
+        base,
+        registry,
+        active_max_bytes=args.active_max_bytes,
+        closed_max_bytes=args.max_bytes,
+        keep_bytes=args.keep_bytes,
+        include_active=args.include_active,
+        include_inactive=args.include_inactive,
+        include_orphans=not args.no_orphans,
+        dry_run=not args.apply,
+    )
+    changed_actions = {"compacted", "rotated-active"}
+    planned_actions = {"would-compact", "would-rotate-active"}
+    changed = [item for item in outcomes if item["action"] in changed_actions]
+    planned = [item for item in outcomes if item["action"] in planned_actions]
+    reclaimed = sum(int(item["reclaimed_bytes"]) for item in changed)
+    reclaimable = sum(int(item["reclaimed_bytes"]) for item in planned)
+    if changed:
+        append_manager_log(
+            base,
+            f"compact-tui-logs files={len(changed)} reclaimed_bytes={reclaimed} "
+            f"include_active={args.include_active} include_inactive={args.include_inactive} "
+            f"include_orphans={not args.no_orphans} closed_max_bytes={args.max_bytes} "
+            f"active_max_bytes={args.active_max_bytes}",
+        )
+    print(f"mode={'apply' if args.apply else 'dry-run'}")
+    print(f"oversized_candidates={len(outcomes)}")
+    print(f"changed_files={len(changed)}")
+    print(f"planned_files={len(planned)}")
+    print(f"reclaimed_bytes={reclaimed}")
+    print(f"reclaimable_bytes={reclaimable}")
+    for item in outcomes:
+        print(
+            f"{item['action']}\tclass={item['class']}\tname={item['name']}\t"
+            f"before={item['before_bytes']}\tafter={item['after_bytes']}\tpath={item['path']}"
+        )
+
+
 def cmd_constraints(args: argparse.Namespace) -> None:
     base = state_dir(args.state_dir)
     path = ensure_constraints_doc(base)
@@ -3903,7 +4277,23 @@ def cmd_stop_consult(args: argparse.Namespace) -> None:
     registry["consult"] = consult
     registry["updated_at"] = now_iso()
     save_registry(base, registry)
+    compacted = None
+    if consult.get("log_file"):
+        log_path = Path(consult["log_file"]).expanduser().resolve()
+        inode = path_inode(log_path)
+        if inode is None or inode not in open_file_inodes([log_path]):
+            compacted = compact_closed_tui_log(
+                log_path,
+                max_bytes=TUI_LOG_CLOSED_MAX_BYTES,
+                keep_bytes=TUI_LOG_RETAIN_BYTES,
+                dry_run=False,
+            )
     append_manager_log(base, f"stop-consult target={target}")
+    if compacted:
+        append_manager_log(
+            base,
+            f"stop-consult-tui-log compacted={compacted['path']} reclaimed_bytes={compacted['reclaimed_bytes']}",
+        )
     append_schedule_event(base, "stop-consult", detail=f"Stopped consultation worker target={target}")
     refresh_schedule_doc(base, registry)
     print(f"stopped consult worker {target}")
@@ -3928,7 +4318,23 @@ def cmd_stop(args: argparse.Namespace) -> None:
     worker["stopped_at"] = now_iso()
     worker["updated_at"] = now_iso()
     save_registry(base, registry)
+    compacted = None
+    if worker.get("log_file"):
+        log_path = Path(worker["log_file"]).expanduser().resolve()
+        inode = path_inode(log_path)
+        if inode is None or inode not in open_file_inodes([log_path]):
+            compacted = compact_closed_tui_log(
+                log_path,
+                max_bytes=TUI_LOG_CLOSED_MAX_BYTES,
+                keep_bytes=TUI_LOG_RETAIN_BYTES,
+                dry_run=False,
+            )
     append_manager_log(base, f"stop name={worker['name']} target={target}")
+    if compacted:
+        append_manager_log(
+            base,
+            f"stop-tui-log name={worker['name']} compacted={compacted['path']} reclaimed_bytes={compacted['reclaimed_bytes']}",
+        )
     append_schedule_event(base, "stop", worker=worker["name"], detail=f"Stopped worker target={target}")
     refresh_schedule_doc(base, registry)
     print(f"stopped {worker['name']}")
@@ -4175,6 +4581,46 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Number of recent terminal workers to keep in workers.json; default {REGISTRY_RECENT_TERMINAL_LIMIT}.",
     )
     compact_registry.set_defaults(func=cmd_compact_registry)
+
+    compact_tui_logs_cmd = sub.add_parser(
+        "compact-tui-logs",
+        help="Bound tmux/Codex TUI transcript logs without touching experiment logs. Dry-run unless --apply is set.",
+    )
+    compact_tui_logs_cmd.add_argument(
+        "--max-bytes",
+        type=int,
+        default=TUI_LOG_CLOSED_MAX_BYTES,
+        help=f"Only compact closed terminal/orphan TUI logs larger than this many bytes; default {TUI_LOG_CLOSED_MAX_BYTES}.",
+    )
+    compact_tui_logs_cmd.add_argument(
+        "--active-max-bytes",
+        type=int,
+        default=TUI_LOG_ACTIVE_ROTATE_MAX_BYTES,
+        help=f"Only rotate active registered TUI logs larger than this many bytes; default {TUI_LOG_ACTIVE_ROTATE_MAX_BYTES}.",
+    )
+    compact_tui_logs_cmd.add_argument(
+        "--keep-bytes",
+        type=int,
+        default=TUI_LOG_RETAIN_BYTES,
+        help=f"Retain at most this many tail bytes for each compacted/rotated TUI log; default {TUI_LOG_RETAIN_BYTES}.",
+    )
+    compact_tui_logs_cmd.add_argument(
+        "--include-active",
+        action="store_true",
+        help="Safely rotate oversized active registered TUI logs by replacing their tmux pipe-pane binding.",
+    )
+    compact_tui_logs_cmd.add_argument(
+        "--include-inactive",
+        action="store_true",
+        help="Also compact registered non-terminal logs whose tmux target is absent and whose file is not open.",
+    )
+    compact_tui_logs_cmd.add_argument(
+        "--no-orphans",
+        action="store_true",
+        help="Do not compact unregistered closed logs under the state directory's logs/ folder.",
+    )
+    compact_tui_logs_cmd.add_argument("--apply", action="store_true", help="Apply the cleanup. Default is a read-only dry-run.")
+    compact_tui_logs_cmd.set_defaults(func=cmd_compact_tui_logs)
 
     constraints = sub.add_parser("constraints", help="View or update unified coordinator constraints loaded by all launched Codex processes.")
     constraints.add_argument("--print", action="store_true", help="Print the constraints file after any update.")

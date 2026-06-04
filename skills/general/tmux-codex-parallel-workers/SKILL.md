@@ -37,6 +37,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Preserve full history in `schedule_events.jsonl`, `coordinator_memory_events.jsonl`, worker progress/report files, and timestamped archives. Rotate bounded event files and archive oversized current-state files before regenerating them.
    - Treat `workers.json` as a bounded current-state registry, not the complete historical ledger. Keep every non-terminal worker plus only a small recent terminal tail; archive a full timestamped registry snapshot before pruning. Use `compact-registry` when auditing or repairing an older state directory.
    - Keep manager/supervisor logs bounded and rotated. Recovery handoff must never enumerate every historical stopped worker or every historical worker's key-file block.
+   - Treat `logs/*.log` created by interactive `tmux pipe-pane` capture as replaceable TUI transcripts, not experiment evidence. The supervisor bounds closed terminal/orphan transcripts above about 5 MB and safely rebinds active registered transcripts above about 50 MB; `compact-tui-logs` provides a dry-run-first manual audit. Never apply this lifecycle to worker-owned experiment/job logs outside the state directory.
 4. Do not launch workers into shared resources blindly.
    - Record project-wide resource rules in `COORDINATOR_CONSTRAINTS.md` before launching workers.
    - Use `constraints --append ...` or `constraints --tensorboard-port-range 16006-16099` to set shared requirements such as TensorBoard safe ports, dashboard bind hosts, output roots, SSH/remote-job rules, or cleanup limits.
@@ -281,6 +282,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --print --context-pack
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-memory --note "Current branch manager reports are stable." --decision "Wait for running jobs before launching more workers." --next-action "Check jobs and compact memory at the next checkpoint."
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-registry
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-tui-logs
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers compact-tui-logs --include-active --apply
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers list
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers schedule
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers consult-context --print
@@ -504,6 +507,7 @@ Use the supervisor for long-running interactive workers or for periodic capture 
 - `--dashboard` refreshes one concise tmux screen with currently present worker windows, current progress summaries, adaptive cadence, and next-check time. It is display-only and is not appended to supervisor logs or management documents.
 - The loop automatically widens its capture interval after two consecutive unchanged cycles, up to the heavy-refresh interval or two hours, and resets to the base interval after a capture change, worker-state change, or supervisor query.
 - The loop throttles expensive refreshes: schedule/context refresh defaults to every 3600 seconds, and unchanged progress-file appends default to every 7200 seconds.
+- Each loop also bounds only state-directory TUI transcripts: closed terminal/orphan logs above about 5 MB are tail-compacted, while active registered logs above about 50 MB are rotated by replacing their `pipe-pane` binding. Open orphan files and registered non-terminal missing-target logs fail closed.
 - `supervise --once` does not append a progress entry when the capture and worker state are unchanged.
 - `--query-interactive` sends a short progress question only to interactive workers marked `stalled` by default. Use `--query-any-running` only when interrupting active workers is acceptable.
 - Use `--query-escape-first` only when you intentionally want the supervisor to send Escape before a query.

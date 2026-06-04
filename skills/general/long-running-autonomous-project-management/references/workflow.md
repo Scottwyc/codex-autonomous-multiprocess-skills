@@ -68,6 +68,7 @@ Use these retention defaults:
 - Keep every non-terminal worker plus only a small recent terminal tail in `workers.json`; archive a complete snapshot before pruning.
 - Compact the live registry around 1 MB or 128 records. Investigate and compact current-state Markdown around 1 MB or 5,000 lines.
 - Rotate event and supervisor logs around 1 MB.
+- Bound `.codex/tmux-workers/logs/*.log` TUI transcripts separately from experiment/job logs: compact closed terminal/orphan transcripts, safely rotate active registered transcripts, and fail closed on open unregistered files.
 - Keep one watcher per current decision gate and one supervisor per state directory. Stop superseded temporary windows.
 
 ## User-Facing Key Results Dashboard

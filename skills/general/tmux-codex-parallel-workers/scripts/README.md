@@ -210,6 +210,7 @@ Important files:
 
 - `workers.json`: bounded current-state worker registry
 - `archive/registry/`: timestamped full worker-registry snapshots created before compaction
+- `logs/`: bounded manager-owned TUI transcripts; `compact-tui-logs` dry-runs or applies closed/orphan compaction and optional active `pipe-pane` rotation without touching experiment/job logs
 - `COORDINATOR_CONSTRAINTS.md`: unified constraints loaded by all launched Codex processes
 - `coordinator_constraints_events.jsonl`: append-only constraints changes
 - `COORDINATOR_CONTEXT_PACK.md`: shortest reload packet for the main coordinator
