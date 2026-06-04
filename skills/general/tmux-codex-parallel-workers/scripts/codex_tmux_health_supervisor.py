@@ -131,6 +131,37 @@ def log(base: Path, level: str, message: str) -> None:
     print(line, end="", flush=True)
 
 
+def print_dashboard(args: argparse.Namespace, statuses: list[dict[str, Any]], cycle: int) -> None:
+    next_check = (
+        dt.datetime.now().astimezone() + dt.timedelta(seconds=args.interval)
+    ).isoformat(timespec="seconds")
+    lines = [
+        "Codex health supervisor dashboard",
+        f"updated={now_iso()} cycle={cycle} next_check={next_check}",
+        (
+            f"policy: workers={'off' if args.no_workers else 'on'} "
+            f"coordinator={'off' if args.no_coordinator else 'on'} "
+            f"interval={args.interval}s stable={args.stable_seconds}s cooldown={args.cooldown}s"
+        ),
+        f"active_targets={len(statuses)}",
+    ]
+    if statuses:
+        for status in statuses:
+            lines.append(
+                "- "
+                f"{status.get('name', '-')} [{status.get('state', 'unknown')}] "
+                f"action={status.get('action', 'none')} "
+                f"reason={status.get('reason', '-')} "
+                f"target={status.get('target', '-')}"
+            )
+    else:
+        lines.append("- no active targets")
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
 def capture_target(target: str, lines: int) -> str:
     result = tmux("capture-pane", "-p", "-S", f"-{lines}", "-t", target, check=False)
     return result.stdout.rstrip() if result.returncode == 0 else ""
@@ -529,6 +560,7 @@ def main() -> int:
     parser.add_argument("--recovery-prompt", default=DEFAULT_RECOVERY_PROMPT)
     parser.add_argument("--escape-after", action="store_true", help="Send Escape after submitting the recovery prompt.")
     parser.add_argument("--dry-run", action="store_true", help="Detect and log recoveries without sending prompts.")
+    parser.add_argument("--dashboard", action="store_true", help="Refresh a concise, ephemeral health dashboard in the current terminal.")
     args = parser.parse_args()
 
     if not args.once and not args.allow_foreground_loop and not os.environ.get("CODEX_HEALTH_SUPERVISOR_MANAGED"):
@@ -563,6 +595,8 @@ def main() -> int:
                     "dry_run": args.dry_run,
                 },
             )
+            if args.dashboard:
+                print_dashboard(args, statuses, cycle)
             if args.once:
                 break
             time.sleep(args.interval)

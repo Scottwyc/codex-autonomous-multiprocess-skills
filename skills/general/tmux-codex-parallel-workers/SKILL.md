@@ -94,6 +94,7 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - For periodic monitor/watch workers, keep only the watcher for the current decision gate. Stop and mark the superseded watcher before keeping or launching the next one.
    - Use one supervisor per state directory. Before starting another, inspect tmux and the supervisor status file and remove or stop duplicates.
    - Use event-driven coordinator updates. Stable unchanged observations should widen the next check interval and should not create schedule, compact-memory, consultation, or progress entries.
+   - Use `--dashboard` when the user should be able to inspect current supervisor progress directly in tmux. The dashboard is an ephemeral single-screen view; it must not tighten polling cadence or append unchanged dashboard text to logs or project-management documents.
 
 ## Manager Script
 
@@ -293,7 +294,7 @@ Run or start the supervisor loop:
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers supervise --once
-python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers start-supervisor --interval 900
+python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers start-supervisor --interval 900 --dashboard
 ```
 
 Start health monitoring and transient-error recovery:
@@ -302,7 +303,7 @@ Start health monitoring and transient-error recovery:
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   --session cw \
-  start-health-supervisor --interval 30 --stable-seconds 20 --cooldown 120
+  start-health-supervisor --interval 30 --stable-seconds 20 --cooldown 120 --dashboard
 ```
 
 Include the main coordinator pane when the coordinator itself is running inside tmux:
@@ -486,6 +487,7 @@ Use the supervisor for long-running interactive workers or for periodic capture 
 - `supervise` without `--once` refuses to run in the coordinator foreground; this prevents unbounded unified exec sessions.
 - `start-supervisor` runs the supervisor loop in a dedicated `cw-supervisor:supervisor` tmux session and is the only normal way to start persistent monitoring.
 - The supervisor writes `.codex/tmux-workers/status/supervisor.json` with its PID, cycle, interval, and last loop timestamp.
+- `--dashboard` refreshes one concise tmux screen with currently present worker windows, current progress summaries, adaptive cadence, and next-check time. It is display-only and is not appended to supervisor logs or management documents.
 - The loop automatically widens its capture interval after two consecutive unchanged cycles, up to the heavy-refresh interval or two hours, and resets to the base interval after a capture change, worker-state change, or supervisor query.
 - The loop throttles expensive refreshes: schedule/context refresh defaults to every 3600 seconds, and unchanged progress-file appends default to every 7200 seconds.
 - `supervise --once` does not append a progress entry when the capture and worker state are unchanged.
@@ -519,6 +521,7 @@ Default health behavior:
 - records per-target loop memory in `.codex/tmux-workers/status/health_supervisor_state.json`
 - logs to `.codex/tmux-workers/logs/health-supervisor.log`
 - appends `health-recovery` events to `schedule_events.jsonl`
+- with `--dashboard`, displays only currently active health targets and their latest state/action in the tmux window; stopped workers remain excluded
 
 Use `--watch-target main=<SESSION:WINDOW.PANE>` to include the main coordinator pane if the main Codex is itself inside tmux. Use `--observe-target name=<SESSION:WINDOW.PANE>` for panes that should be monitored but never auto-recovered.
 

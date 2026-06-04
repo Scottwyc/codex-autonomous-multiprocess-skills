@@ -1595,6 +1595,80 @@ def effective_state(worker: dict[str, Any], default_session: str) -> str:
     return str(state or "not-present")
 
 
+def dashboard_progress_summary(worker: dict[str, Any], limit: int = 180) -> str:
+    raw = worker.get("progress_file")
+    if not raw:
+        return "progress unavailable"
+    path = Path(raw)
+    if not path.is_file():
+        return "progress file missing"
+    text = path.read_text(encoding="utf-8", errors="replace")
+    status_match = re.search(r"^Status:\s*(.+)$", text, flags=re.MULTILINE)
+    status = one_line(status_match.group(1), 64) if status_match else ""
+    current_match = re.search(
+        r"^## Current Progress\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    detail = ""
+    if current_match:
+        bullets = [
+            one_line(line.removeprefix("-").strip(), 120)
+            for line in current_match.group("body").splitlines()
+            if line.strip().startswith("-")
+        ]
+        if bullets:
+            detail = bullets[-1]
+    if status and detail:
+        return one_line(f"{status}; {detail}", limit)
+    return one_line(status or detail or "progress recorded", limit)
+
+
+def print_supervisor_dashboard(
+    registry: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    cycle: int,
+    changed: bool,
+    current_interval: int,
+    stable_cycles: int,
+) -> None:
+    updated_at = now_iso()
+    next_check = (
+        dt.datetime.now().astimezone() + dt.timedelta(seconds=current_interval)
+    ).isoformat(timespec="seconds")
+    rows: list[tuple[str, str, str, str]] = []
+    for name, worker in sorted(registry.get("workers", {}).items()):
+        session = worker.get("session", args.session)
+        window = worker.get("window", "")
+        if not window or not window_exists(session, window):
+            continue
+        state = effective_state(worker, args.session)
+        if state in TERMINAL_WORKER_STATES:
+            continue
+        target = f"{session}:{window}"
+        rows.append((name, state, target, dashboard_progress_summary(worker)))
+
+    lines = [
+        "Codex worker supervisor dashboard",
+        f"updated={updated_at} cycle={cycle} changed={str(changed).lower()}",
+        (
+            f"cadence={current_interval}s stable_cycles={stable_cycles} "
+            f"next_check={next_check}"
+        ),
+        f"active_worker_windows={len(rows)}",
+    ]
+    if rows:
+        for name, state, target, summary in rows:
+            lines.extend([f"- {name} [{state}] {target}", f"  {summary}"])
+    else:
+        lines.append("- no active worker windows")
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
 def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -1930,6 +2004,7 @@ def supervisor_command(
     query_interval: int,
     refresh_schedule_interval: int,
     progress_append_interval: int,
+    dashboard: bool,
 ) -> str:
     cmd = [
         sys.executable,
@@ -1953,13 +2028,20 @@ def supervisor_command(
     ]
     if ask:
         cmd.append("--query-interactive")
+    if dashboard:
+        cmd.append("--dashboard")
     quoted = " ".join(shlex.quote(part) for part in cmd)
     log_file = base / "logs" / "supervisor.log"
+    supervisor_run = (
+        f"{quoted}; "
+        if dashboard
+        else f"{quoted} 2>&1 | tee -a {shlex.quote(str(log_file))}; "
+    )
     return (
         "set -uo pipefail; "
         f"mkdir -p {shlex.quote(str(log_file.parent))}; "
         f"printf '[%s] supervisor started\\n' \"$(date -Is)\" | tee -a {shlex.quote(str(log_file))}; "
-        f"{quoted} 2>&1 | tee -a {shlex.quote(str(log_file))}; "
+        f"{supervisor_run}"
         "exec bash"
     )
 
@@ -1981,6 +2063,7 @@ def health_supervisor_command(
     dry_run: bool,
     escape_after: bool,
     recovery_prompt: str | None,
+    dashboard: bool,
 ) -> str:
     cmd = [
         sys.executable,
@@ -2018,6 +2101,8 @@ def health_supervisor_command(
         cmd.append("--escape-after")
     if recovery_prompt:
         cmd.extend(["--recovery-prompt", recovery_prompt])
+    if dashboard:
+        cmd.append("--dashboard")
     quoted = " ".join(shlex.quote(part) for part in cmd)
     log_file = base / "logs" / "health-supervisor.log"
     return (
@@ -2536,6 +2621,7 @@ def cmd_launch(args: argparse.Namespace) -> None:
             args.supervisor_query_interval,
             args.supervisor_refresh_schedule_interval,
             args.supervisor_progress_append_interval,
+            False,
             shared_session,
         )
 
@@ -2976,6 +3062,15 @@ def cmd_supervise(args: argparse.Namespace) -> None:
                 )
                 + "\n",
             )
+            if args.dashboard:
+                print_supervisor_dashboard(
+                    registry,
+                    args,
+                    cycle=cycle,
+                    changed=cycle_changed,
+                    current_interval=current_interval,
+                    stable_cycles=stable_cycles,
+                )
             now_ts = time.time()
             if args.once or now_ts - last_schedule_refresh_ts >= args.refresh_schedule_interval:
                 refresh_schedule_doc(base, load_registry(base))
@@ -3016,6 +3111,7 @@ def start_supervisor_window(
     query_interval: int,
     refresh_schedule_interval: int,
     progress_append_interval: int,
+    dashboard: bool,
     shared_session: bool,
 ) -> None:
     require_binary("tmux")
@@ -3030,7 +3126,17 @@ def start_supervisor_window(
         print(f"supervisor already present at {session}:{window}")
         return
     rotate_text_log(base / "logs" / "supervisor.log")
-    command = supervisor_command(base, namespace, interval, ask, lines, query_interval, refresh_schedule_interval, progress_append_interval)
+    command = supervisor_command(
+        base,
+        namespace,
+        interval,
+        ask,
+        lines,
+        query_interval,
+        refresh_schedule_interval,
+        progress_append_interval,
+        dashboard,
+    )
     start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     append_manager_log(base, f"start-supervisor session={session} window={window} interval={interval} ask={ask}")
     append_schedule_event(base, "start-supervisor", detail=f"Started supervisor at {session}:{window} interval={interval} ask={ask}")
@@ -3052,6 +3158,7 @@ def cmd_start_supervisor(args: argparse.Namespace) -> None:
         args.query_interval,
         args.refresh_schedule_interval,
         args.progress_append_interval,
+        args.dashboard,
         args.shared_session,
     )
 
@@ -3074,6 +3181,7 @@ def start_health_supervisor_window(
     dry_run: bool,
     escape_after: bool,
     recovery_prompt: str | None,
+    dashboard: bool,
     force: bool,
     shared_session: bool,
 ) -> None:
@@ -3109,6 +3217,7 @@ def start_health_supervisor_window(
         dry_run,
         escape_after,
         recovery_prompt,
+        dashboard,
     )
     start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
     append_manager_log(
@@ -3156,6 +3265,7 @@ def cmd_start_health_supervisor(args: argparse.Namespace) -> None:
         args.dry_run,
         args.escape_after,
         args.recovery_prompt,
+        args.dashboard,
         args.force,
         args.shared_session,
     )
@@ -3882,6 +3992,7 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--interval", type=int, default=900)
     supervise.add_argument("--lines", type=int, default=120)
     supervise.add_argument("--once", action="store_true")
+    supervise.add_argument("--dashboard", action="store_true", help="Refresh a concise, ephemeral progress dashboard in the current terminal.")
     supervise.add_argument("--allow-foreground-loop", action="store_true", help=argparse.SUPPRESS)
     supervise.add_argument("--refresh-schedule-interval", type=int, default=3600, help="Seconds between heavy schedule/context refreshes in loop mode.")
     supervise.add_argument("--progress-append-interval", type=int, default=7200, help="Seconds between unchanged supervisor progress entries.")
@@ -3904,6 +4015,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_supervisor.add_argument("--refresh-schedule-interval", type=int, default=3600)
     start_supervisor.add_argument("--progress-append-interval", type=int, default=7200)
     start_supervisor.add_argument("--query-interactive", action="store_true")
+    start_supervisor.add_argument("--dashboard", action="store_true", help="Show a concise progress dashboard in the supervisor tmux window.")
     start_supervisor.set_defaults(func=cmd_start_supervisor)
 
     start_health = sub.add_parser("start-health-supervisor", help="Start a tmux health supervisor that recovers Codex panes stuck on known transient errors.")
@@ -3922,6 +4034,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_health.add_argument("--dry-run", action="store_true", help="Detect and log recovery actions without sending prompts.")
     start_health.add_argument("--escape-after", action="store_true", help="Send Escape after submitting a recovery prompt.")
     start_health.add_argument("--recovery-prompt", help="Override the default recovery prompt sent to stuck interactive Codex panes.")
+    start_health.add_argument("--dashboard", action="store_true", help="Show a concise health dashboard in the health-supervisor tmux window.")
     start_health.add_argument("--force", action="store_true", help="Replace an existing cw-health-supervisor target.")
     start_health.set_defaults(func=cmd_start_health_supervisor)
 
