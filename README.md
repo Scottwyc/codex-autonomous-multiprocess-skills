@@ -22,7 +22,7 @@ Recent scheduling defaults make this explicit: coordinator checkpoints are event
 
 For large experiment lines, the coordinator can delegate branch-level planning to a `branch-manager` worker. That branch manager can launch front-line `autonomous-experiment` children with `--parent-worker`, coordinate short `peer-send` messages between them, and report branch-level summaries back to the main coordinator.
 
-If the main coordinator itself is running inside tmux, it can be registered with `register-coordinator`. The health supervisor can then detect `Codex ran out of room in the model's context window`, close the exhausted coordinator pane when present, launch a recovered coordinator in its own tmux session with `recover-coordinator`, and hand it `COORDINATOR_RECOVERY.md` plus the existing worker registry, schedule, progress/report files, jobs, peer messages, branch summaries, and consultation context. Replacement of a merely missing coordinator target remains an explicit `--restart-main-when-missing` opt-in.
+If the main coordinator itself is running inside tmux, it can be registered with `register-coordinator`. The health supervisor can then detect `Codex ran out of room in the model's context window`, run `recover-coordinator`, and respawn the exact registered pane in place while handing the fresh thread `COORDINATOR_RECOVERY.md` plus the existing worker registry, schedule, progress/report files, jobs, peer messages, branch summaries, and consultation context. This stable-target policy prevents coordinator-registration drift and dual-main sessions. Replacement of a confirmed-missing coordinator target remains an explicit `--restart-main-when-missing` opt-in.
 
 ## Documentation Maintenance / README 维护规则
 
@@ -496,7 +496,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   resume <worker> --mode interactive
 ```
 
-如果是主进程窗口本身需要重开，应先确保已经 `register-coordinator`，再用 `recover-coordinator --kill-old` 从 durable state 开一个新的主进程窗口。
+如果是主进程窗口本身需要重开，应先确保已经 `register-coordinator`，再用 `recover-coordinator` 从 durable state 在原精确 pane 上原位恢复。只有注册 target 已确认不存在时，才显式使用 `recover-coordinator --new-target` 创建替代目标。
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
@@ -788,13 +788,12 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --state-dir .codex/tmux-workers \
   --session cw \
   start-health-supervisor \
-  --restart-main-on-context-full \
-  --restart-main-when-missing
+  --restart-main-on-context-full
 ```
 
-当注册主进程出现上下文耗尽，或注册 target 直接消失且启用了 `--restart-main-when-missing` 时，health supervisor 会写入恢复调度事件，调用 `recover-coordinator`，刷新 `COORDINATOR_RECOVERY.md`，关闭旧主进程 pane，新开 `cw-main-recovered-...:codex` 之类的独立 tmux session，并启动新的 Codex 主进程继续调度。
+当注册主进程出现上下文耗尽时，health supervisor 会写入恢复调度事件，调用 `recover-coordinator`，刷新 `COORDINATOR_RECOVERY.md`，并使用 `tmux respawn-pane -k` 在原精确 `SESSION:WINDOW.PANE` target 上启动新的 Codex 主线程继续调度。注册 target 保持不变，也不会额外创建 `cw-main-recovered-*` 双主会话。
 
-如果不希望自动关闭旧主进程：
+只有注册 target 已确认不存在，而且统一约束明确授权替代目标时，才额外启用：
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
@@ -802,9 +801,10 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --session cw \
   start-health-supervisor \
   --restart-main-on-context-full \
-  --restart-main-when-missing \
-  --keep-old-main
+  --restart-main-when-missing
 ```
+
+缺失目标恢复会显式请求 `--new-target`；默认 `recover-coordinator` 对缺失目标 fail-closed。`--keep-old-main` 和 `--kill-old` 仅保留为兼容 no-op，不应再用于控制恢复策略。
 
 手动接管：
 
@@ -812,7 +812,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   --session cw \
-  recover-coordinator --reason manual-restart --kill-old
+  recover-coordinator --reason manual-restart
 ```
 
 如果只想观察某个 pane，而绝不自动发送恢复 prompt：
@@ -1091,7 +1091,7 @@ python "$MANAGER" --state-dir .codex/tmux-workers peer-send child-a child-b \
 
 ### `codex_tmux_health_supervisor.py`
 
-Low-level health supervisor used by the manager's `start-health-supervisor` command. It monitors tmux Codex panes for recoverable transport/subprocess failures and sends a bounded continuation prompt when a pane is stuck. When the main coordinator is registered and `--restart-main-on-context-full` is enabled, it treats context-window exhaustion as fatal to the old thread and launches a recovered coordinator from `COORDINATOR_RECOVERY.md`.
+Low-level health supervisor used by the manager's `start-health-supervisor` command. It monitors tmux Codex panes for recoverable transport/subprocess failures and sends a bounded continuation prompt when a pane is stuck. When the main coordinator is registered and `--restart-main-on-context-full` is enabled, it treats context-window exhaustion as fatal to the old thread and respawns a recovered coordinator from `COORDINATOR_RECOVERY.md` at the exact registered pane target.
 
 Typical direct dry-run:
 
@@ -1197,7 +1197,7 @@ tmux attach -t cw-branch-a
 - The coordinator should use `COORDINATOR_CONTEXT_PACK.md` and `COORDINATOR_MEMORY.md` as short working memory, and should run `compact-memory --note ... --decision ... --next-action ...` after meaningful decisions.
 - The coordinator must not create schedule, memory, consultation, or progress entries for unchanged polling cycles.
 - Temporary coordinator documents and `workers.json` are bounded current-state views; complete history belongs in event logs, worker reports, and timestamped archives.
-- Register tmux-hosted main coordinators with `register-coordinator` when long autonomous recovery matters. A recovered coordinator must start from `COORDINATOR_RECOVERY.md` and `COORDINATOR_SCHEDULE.md`, not from stale memory.
+- Register tmux-hosted main coordinators with their exact pane target using `register-coordinator` when long autonomous recovery matters. A recovered coordinator must start from `COORDINATOR_RECOVERY.md` and `COORDINATOR_SCHEDULE.md`, not from stale memory, and must preserve the registered target whenever it still exists.
 - Default coordinator checks should start from `compact-memory --print --context-pack`, `list`, `jobs`, and `progress --lines 20`; schedule, collect, larger captures, or raw artifacts are for concrete diagnosis or final review.
 - The health supervisor targets transient Codex pane stalls and, when explicitly enabled, registered-coordinator context exhaustion. It is not a replacement for debugging quota/auth failures, failed tests, merge conflicts, bad metrics, or missing durable project documentation.
 

@@ -168,20 +168,24 @@ def capture_target(target: str, lines: int) -> str:
 
 
 def target_alive(target: str) -> bool:
-    result = tmux("list-panes", "-t", target, "-F", "#{pane_pid}", check=False)
-    if result.returncode != 0:
-        return False
-    for raw in result.stdout.splitlines():
-        raw = raw.strip()
-        if not raw.isdigit():
+    exact = tmux("display-message", "-p", "-t", target, "#{pane_pid}", check=False)
+    results = [exact]
+    if exact.returncode != 0 or not exact.stdout.strip().isdigit():
+        results.append(tmux("list-panes", "-t", target, "-F", "#{pane_pid}", check=False))
+    for result in results:
+        if result.returncode != 0:
             continue
-        try:
-            os.kill(int(raw), 0)
-            return True
-        except ProcessLookupError:
-            continue
-        except PermissionError:
-            return True
+        for raw in result.stdout.splitlines():
+            raw = raw.strip()
+            if not raw.isdigit():
+                continue
+            try:
+                os.kill(int(raw), 0)
+                return True
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                return True
     return False
 
 
@@ -366,8 +370,8 @@ def recover_coordinator(base: Path, args: argparse.Namespace, target: str, reaso
         "--old-target",
         target,
     ]
-    if not args.keep_old_main:
-        cmd.append("--kill-old")
+    if reason == "coordinator-target-missing":
+        cmd.append("--new-target")
     if args.dry_run:
         return None
     return run(cmd, check=False)
@@ -413,7 +417,7 @@ def supervise_target(
             state["missing_recovery_count"] = int(state.get("missing_recovery_count", 0)) + 1
             target_status["action"] = "dry-run-recover-coordinator-missing" if args.dry_run else "recover-coordinator-missing"
             log(base, "ERROR", f"{name}: coordinator target missing; action={target_status['action']} target={target}")
-            append_schedule_event(base, "coordinator-missing-recovery", f"{target} dry_run={args.dry_run} keep_old={args.keep_old_main}", name)
+            append_schedule_event(base, "coordinator-missing-recovery", f"{target} dry_run={args.dry_run} policy=new-target", name)
             result = recover_coordinator(base, args, target, "coordinator-target-missing")
             if result is not None:
                 target_status["recover_exit_code"] = result.returncode
@@ -489,7 +493,7 @@ def supervise_target(
         state["recovery_count"] = int(state.get("recovery_count", 0)) + 1
         target_status["action"] = "dry-run-recover-coordinator" if args.dry_run else "recover-coordinator"
         log(base, "ERROR", f"{name}: coordinator context exhausted; action={target_status['action']} target={target}")
-        append_schedule_event(base, "coordinator-context-recovery", f"{target} dry_run={args.dry_run} keep_old={args.keep_old_main}", name)
+        append_schedule_event(base, "coordinator-context-recovery", f"{target} dry_run={args.dry_run} policy=in-place", name)
         if not args.dry_run:
             result = recover_coordinator(base, args, target, "context-window-exhausted")
             target_status["recover_exit_code"] = result.returncode
@@ -556,7 +560,7 @@ def main() -> int:
     parser.add_argument("--fatal-context-pattern", action="append", help="Additional case-insensitive regex treated as coordinator context exhaustion.")
     parser.add_argument("--restart-main-on-context-full", action="store_true", help="Auto-launch recover-coordinator when the registered main coordinator exhausts context.")
     parser.add_argument("--restart-main-when-missing", action="store_true", help="Auto-launch recover-coordinator when the registered main coordinator target disappears.")
-    parser.add_argument("--keep-old-main", action="store_true", help="Do not kill the old coordinator pane during main-coordinator auto-recovery.")
+    parser.add_argument("--keep-old-main", action="store_true", help="Deprecated no-op; stable-target recovery never keeps a second live main coordinator.")
     parser.add_argument("--recovery-prompt", default=DEFAULT_RECOVERY_PROMPT)
     parser.add_argument("--escape-after", action="store_true", help="Send Escape after submitting the recovery prompt.")
     parser.add_argument("--dry-run", action="store_true", help="Detect and log recoveries without sending prompts.")

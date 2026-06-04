@@ -468,7 +468,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   resume <worker> --mode interactive
 ```
 
-如果是主进程窗口本身需要重开，应先确保已经 `register-coordinator`，再用 `recover-coordinator --kill-old` 从 durable state 开一个新的主进程窗口。
+如果是主进程窗口本身需要重开，应先确保已经 `register-coordinator`，再用 `recover-coordinator` 从 durable state 在原精确 pane 上原位恢复。只有注册 target 已确认不存在时，才显式使用 `recover-coordinator --new-target` 创建替代目标。
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
@@ -760,21 +760,19 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --state-dir .codex/tmux-workers \
   --session cw \
   start-health-supervisor \
-  --restart-main-on-context-full \
-  --restart-main-when-missing
+  --restart-main-on-context-full
 ```
 
-当注册主进程出现上下文耗尽，或注册 target 直接消失且启用了 `--restart-main-when-missing` 时，health supervisor 会：
+当注册主进程出现上下文耗尽时，health supervisor 会：
 
 - 写入 `coordinator-context-recovery` 调度事件；
-- 调用 `recover-coordinator --reason context-window-exhausted --old-target <old> --kill-old`；
+- 调用 `recover-coordinator --reason context-window-exhausted --old-target <old>`；
 - 先刷新 `COORDINATOR_RECOVERY.md`；
-- 关闭旧主进程 pane；
-- 新开 `cw-main-recovered-...:codex` 之类的独立 tmux session；
-- 启动新的 Codex 主进程，并粘贴恢复 prompt；
+- 使用 `tmux respawn-pane -k` 在原精确 target 上原位启动新的 Codex 主线程，并粘贴恢复 prompt；
+- 保持 coordinator 注册 target 不变，不创建第二个 `cw-main-recovered-*` 主会话；
 - 新主进程读取 `COORDINATOR_RECOVERY.md`、`COORDINATOR_SCHEDULE.md`、`workers.json`、progress/report/jobs、branch-manager 汇总和 consult context 后继续调度。
 
-如果不希望自动关闭旧主进程：
+只有注册 target 已确认不存在，而且统一约束明确授权替代目标时，才额外启用：
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
@@ -782,9 +780,10 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   --session cw \
   start-health-supervisor \
   --restart-main-on-context-full \
-  --restart-main-when-missing \
-  --keep-old-main
+  --restart-main-when-missing
 ```
+
+缺失目标恢复会显式请求 `--new-target`；默认 `recover-coordinator` 对缺失目标 fail-closed。`--keep-old-main` 和 `--kill-old` 仅保留为兼容 no-op，不应再用于控制恢复策略。
 
 手动接管：
 
@@ -792,7 +791,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
   --session cw \
-  recover-coordinator --reason manual-restart --kill-old
+  recover-coordinator --reason manual-restart
 ```
 
 如果只想观察某个 pane，而绝不自动发送恢复 prompt：

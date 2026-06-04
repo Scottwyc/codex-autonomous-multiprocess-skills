@@ -78,7 +78,8 @@ It also includes a Qwen-style health supervisor for Codex tmux panes. The normal
    - Start it with `start-health-supervisor`; it runs in `cw-health-supervisor:health-supervisor`.
    - It automatically monitors registered interactive workers and the registered main coordinator target unless disabled.
    - When the main coordinator itself runs inside tmux, register it with `register-coordinator` before starting health supervision. This writes `COORDINATOR_RECOVERY.md`, records the coordinator target/model/cwd, and lets a later coordinator reconstruct the run from durable state.
-   - If the registered coordinator hits context-window exhaustion, start health supervision with `--restart-main-on-context-full`. Treat `--restart-main-when-missing` as an explicit opt-in only when coordinator-wide constraints authorize automatic replacement of a missing target. The health supervisor calls `recover-coordinator`, optionally kills the old pane, and launches a new main coordinator that reads `COORDINATOR_RECOVERY.md`, `COORDINATOR_SCHEDULE.md`, workers, jobs, reports, and consultation context.
+   - If the registered coordinator hits context-window exhaustion, start health supervision with `--restart-main-on-context-full`. `recover-coordinator` then uses `tmux respawn-pane -k` at the exact registered target, preserving the registry target and preventing a second main coordinator session.
+   - Treat `--restart-main-when-missing` as an explicit opt-in only when coordinator-wide constraints authorize automatic replacement of a missing target. Missing-target recovery passes `--new-target`; the manager fails closed without it and rejects it while the registered target is still present. `--keep-old-main` is retained only as a deprecated no-op.
    - It auto-recovers only interactive Codex panes. Use `--observe-target` for panes that should be logged but never receive pasted recovery prompts.
    - It is for recoverable network/subprocess stalls, not semantic experiment failures, quota/auth failures, merge conflicts, or metric regressions.
 12. Use branch-manager workers for major branches.
@@ -140,8 +141,18 @@ python /home/wuyangcheng/.codex/skills/general/tmux-codex-parallel-workers/scrip
   --state-dir .codex/tmux-workers \
   --session cw \
   recover-coordinator \
-  --reason manual-restart \
-  --kill-old
+  --reason manual-restart
+```
+
+The default recovery policy is stable-target in-place replacement. It writes the durable handoff, respawns the exact registered pane, and leaves the coordinator registry target unchanged. If the registered target is confirmed absent, recovery fails closed unless the coordinator explicitly adds `--new-target`. The manager rejects `--new-target` while the registered target is still present.
+
+```bash
+python /home/wuyangcheng/.codex/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py \
+  --state-dir .codex/tmux-workers \
+  --session cw \
+  recover-coordinator \
+  --reason confirmed-target-missing \
+  --new-target
 ```
 
 Refresh the consultation context and notify the consultation window:
@@ -321,7 +332,7 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
   start-health-supervisor --restart-main-on-context-full
 ```
 
-Add `--restart-main-when-missing` only when coordinator-wide constraints explicitly authorize automatic replacement of a missing target. Use `--dry-run` first if you want detection logs without pasted recovery prompts. Stop it with:
+Add `--restart-main-when-missing` only when coordinator-wide constraints explicitly authorize automatic replacement of a missing target. Context-full recovery stays at the exact registered target; missing-target replacement is the only health-supervisor path that requests `--new-target`. Use `--dry-run` first if you want detection logs without pasted recovery prompts. Stop it with:
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" --state-dir .codex/tmux-workers --session cw stop-health-supervisor
@@ -424,7 +435,7 @@ This worker type is designed for visibility:
 
 The coordinator should still assign explicit `--owned-path` and `--resource` tokens. The worker may iterate inside its assigned experiment branch, but final acceptance, merging, promotion, and user-facing conclusions remain coordinator-owned.
 
-If an older worker was launched with inline TUI and its bottom prompt/status line is missing, restart it through durable state: `stop <worker>` then `resume <worker> --mode interactive` without `--inline-tui`. For the main coordinator pane, prefer `recover-coordinator --kill-old` after `register-coordinator` has written a durable handoff.
+If an older worker was launched with inline TUI and its bottom prompt/status line is missing, restart it through durable state: `stop <worker>` then `resume <worker> --mode interactive` without `--inline-tui`. For the main coordinator pane, prefer `recover-coordinator` after `register-coordinator` has written a durable handoff; it respawns the exact registered pane in place.
 
 ## Coordinator Schedule Pattern
 
@@ -515,8 +526,9 @@ Use `start-health-supervisor` in addition to `start-supervisor` for long-lived a
 Default health behavior:
 
 - monitors registered workers from `workers.json`
+- resolves exact `SESSION:WINDOW.PANE` targets with a pane-safe PID check
 - auto-recovers only `mode=interactive` workers
-- skips stopped workers
+- skips workers with `stopped_at`, while keeping unexpected missing active workers in monitoring
 - records state in `.codex/tmux-workers/status/health_supervisor.json`
 - records per-target loop memory in `.codex/tmux-workers/status/health_supervisor_state.json`
 - logs to `.codex/tmux-workers/logs/health-supervisor.log`

@@ -1011,7 +1011,33 @@ def window_exists(session: str, window: str) -> bool:
 def tmux_target_present(target: str) -> bool:
     if not target:
         return False
+    exact = tmux("display-message", "-p", "-t", target, "#{pane_id}", check=False)
+    if exact.returncode == 0 and exact.stdout.strip():
+        return True
     return tmux("list-panes", "-t", target, "-F", "#{pane_id}", check=False).returncode == 0
+
+
+def tmux_target_identity(target: str) -> tuple[str, str, str] | None:
+    if not target:
+        return None
+    result = tmux(
+        "display-message",
+        "-p",
+        "-t",
+        target,
+        "#{session_name}\t#{window_name}\t#{pane_index}",
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    parts = result.stdout.strip().split("\t")
+    if len(parts) != 3 or not all(parts):
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+def respawn_tmux_pane(target: str, cwd: Path, command: str) -> None:
+    tmux("respawn-pane", "-k", "-t", target, "-c", str(cwd), "bash", "-lc", command)
 
 
 def infer_current_tmux_target() -> str | None:
@@ -2218,23 +2244,54 @@ def cmd_recover_coordinator(args: argparse.Namespace) -> None:
         raise SystemExit("No registered coordinator found. Run register-coordinator first or pass --cwd for manual recovery.")
     cwd = Path(args.cwd or coordinator.get("cwd", os.getcwd())).expanduser().resolve()
     namespace = args.session or coordinator.get("session_namespace") or registry.get("session_namespace") or registry.get("session") or DEFAULT_SESSION
-    shared_session = bool(args.shared_session)
-    old_target = args.old_target or coordinator.get("target", "")
+    registered_target = coordinator.get("target", "")
+    if args.old_target and registered_target and args.old_target != registered_target:
+        raise SystemExit(
+            f"--old-target {args.old_target} does not match registered coordinator target {registered_target}; "
+            "refusing recovery target drift"
+        )
+    old_target = registered_target or args.old_target or ""
     reason = args.reason or "manual-recovery"
-    if shared_session:
-        session = namespace
-        ensure_session(session, cwd)
-        window = safe_name(args.window) if args.window else unique_window_name(session, coordinator.get("restart_window_prefix", "main-recovered"))
+    old_target_present = tmux_target_present(old_target)
+    if old_target_present and args.new_target:
+        raise SystemExit(
+            f"registered coordinator target is still present: {old_target}; "
+            "refusing --new-target because it would create a second main coordinator"
+        )
+    if not old_target_present and not args.new_target:
+        missing = old_target or "<unregistered>"
+        raise SystemExit(
+            f"coordinator target is not present: {missing}; recovery fails closed by default. "
+            "Pass --new-target only after confirming the old target is truly absent."
+        )
+
+    shared_session = bool(args.shared_session)
+    if old_target_present:
+        recovery_policy = "in-place"
+        identity = tmux_target_identity(old_target)
+        if identity is None:
+            raise SystemExit(f"coordinator target disappeared before in-place recovery: {old_target}")
+        session, window, _ = identity
+        target = old_target
+        recovery_session_mode = coordinator.get("session_mode") or ("shared" if shared_session else "independent")
     else:
-        recovery_prefix = strip_namespace_prefix(namespace, coordinator.get("restart_window_prefix", "main-recovered"))
-        suffix = safe_name(args.window) if args.window else safe_name(f"{recovery_prefix}-{timestamp_slug()}")
-        session = unique_session_name(namespace, suffix)
-        window = "codex"
-    if (shared_session and window_exists(session, window)) or ((not shared_session) and session_exists(session)):
-        if not args.force:
-            raise SystemExit(f"tmux target already exists: {session}:{window}; use --force to replace it")
-        stop_tmux_target(session, window, independent_session=not shared_session)
-        time.sleep(0.5)
+        recovery_policy = "new-target"
+        recovery_session_mode = "shared" if shared_session else "independent"
+        if shared_session:
+            session = namespace
+            ensure_session(session, cwd)
+            window = safe_name(args.window) if args.window else unique_window_name(session, coordinator.get("restart_window_prefix", "main-recovered"))
+        else:
+            recovery_prefix = strip_namespace_prefix(namespace, coordinator.get("restart_window_prefix", "main-recovered"))
+            suffix = safe_name(args.window) if args.window else safe_name(f"{recovery_prefix}-{timestamp_slug()}")
+            session = unique_session_name(namespace, suffix)
+            window = "codex"
+        target = f"{session}:{window}"
+        if (shared_session and window_exists(session, window)) or ((not shared_session) and session_exists(session)):
+            if not args.force:
+                raise SystemExit(f"tmux target already exists: {target}; use --force to replace it")
+            stop_tmux_target(session, window, independent_session=not shared_session)
+            time.sleep(0.5)
 
     model = args.model if args.model is not None else coordinator.get("model")
     reasoning_effort = args.reasoning_effort if args.reasoning_effort is not None else coordinator.get("reasoning_effort")
@@ -2288,17 +2345,21 @@ Key files:
     write_text(prompt_file, prompt)
 
     if args.dry_run:
-        append_manager_log(base, f"recover-coordinator dry-run reason={reason} old_target={old_target} new_target={session}:{window}")
-        append_schedule_event(base, "coordinator-recovery-dry-run", detail=f"Would recover coordinator old={old_target} new={session}:{window} reason={reason}")
+        append_manager_log(base, f"recover-coordinator dry-run policy={recovery_policy} reason={reason} old_target={old_target} target={target}")
+        append_schedule_event(
+            base,
+            "coordinator-recovery-dry-run",
+            detail=f"Would recover coordinator policy={recovery_policy} old={old_target} target={target} reason={reason}",
+        )
         print(f"dry_run=true")
-        print(f"would_launch={session}:{window}")
+        print(f"recovery_policy={recovery_policy}")
+        if recovery_policy == "in-place":
+            print(f"would_respawn={target}")
+        else:
+            print(f"would_launch={target}")
         print(f"prompt={prompt_file}")
         print(f"handoff={handoff}")
         return
-
-    if args.kill_old and old_target and tmux_target_present(old_target):
-        tmux("kill-pane", "-t", old_target, check=False)
-        append_manager_log(base, f"recover-coordinator killed old target={old_target}")
 
     log_file = coordinator_log_path(base)
     status_file = coordinator_status_path(base)
@@ -2317,8 +2378,23 @@ Key files:
         search=search,
         inline_tui=inline_tui,
     )
-    start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
-    target = f"{session}:{window}"
+    if recovery_policy == "in-place":
+        if not tmux_target_present(target):
+            raise SystemExit(f"coordinator target disappeared before in-place respawn: {target}")
+        respawn_tmux_pane(target, cwd, command)
+    else:
+        if old_target and tmux_target_present(old_target):
+            raise SystemExit(
+                f"coordinator target reappeared before replacement launch: {old_target}; "
+                "refusing to create a second main coordinator"
+            )
+        start_tmux_target(session, window, cwd, command, independent_session=not shared_session)
+        if old_target and tmux_target_present(old_target):
+            stop_tmux_target(session, window, independent_session=not shared_session)
+            raise SystemExit(
+                f"coordinator target reappeared during replacement launch: {old_target}; "
+                f"stopped replacement {target}"
+            )
     tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(str(log_file))}")
     time.sleep(args.startup_wait)
     send_prompt(
@@ -2332,7 +2408,7 @@ Key files:
     )
 
     previous_targets = list(coordinator.get("previous_targets", []))
-    if old_target:
+    if recovery_policy == "new-target" and old_target:
         previous_targets.append({"target": old_target, "ended_at": now_iso(), "reason": reason})
         previous_targets = previous_targets[-20:]
     coordinator.update(
@@ -2342,7 +2418,7 @@ Key files:
             "session": session,
             "window": window,
             "session_namespace": namespace,
-            "session_mode": "shared" if shared_session else "independent",
+            "session_mode": recovery_session_mode,
             "cwd": str(cwd),
             "model": model,
             "reasoning_effort": reasoning_effort,
@@ -2358,6 +2434,7 @@ Key files:
             "log_file": str(log_file),
             "last_recovery_at": now_iso(),
             "last_recovery_reason": reason,
+            "last_recovery_policy": recovery_policy,
             "recovery_count": int(coordinator.get("recovery_count", 0)) + 1,
             "previous_targets": previous_targets,
             "updated_at": now_iso(),
@@ -2367,14 +2444,26 @@ Key files:
     registry["coordinator"] = coordinator
     registry["session"] = namespace
     registry["session_namespace"] = namespace
-    registry["session_mode"] = "shared" if shared_session else "independent"
+    registry["session_mode"] = recovery_session_mode
     registry["updated_at"] = now_iso()
     save_registry(base, registry)
-    write_text(status_file, json.dumps({"state": "launched", "target": target, "recovered_at": now_iso(), "reason": reason}, ensure_ascii=False) + "\n")
-    append_manager_log(base, f"recover-coordinator old={old_target} new={target} reason={reason}")
-    append_schedule_event(base, "coordinator-recovery", detail=f"Recovered coordinator old={old_target} new={target} reason={reason}")
+    write_text(
+        status_file,
+        json.dumps(
+            {"state": "launched", "target": target, "recovered_at": now_iso(), "reason": reason, "policy": recovery_policy},
+            ensure_ascii=False,
+        )
+        + "\n",
+    )
+    append_manager_log(base, f"recover-coordinator policy={recovery_policy} old={old_target} target={target} reason={reason}")
+    append_schedule_event(
+        base,
+        "coordinator-recovery",
+        detail=f"Recovered coordinator policy={recovery_policy} old={old_target} target={target} reason={reason}",
+    )
     refresh_schedule_doc(base, registry)
     print(f"recovered_coordinator={target}")
+    print(f"recovery_policy={recovery_policy}")
     print(f"prompt={prompt_file}")
     print(f"handoff={handoff}")
     print_window_access(session, window)
@@ -3823,7 +3912,10 @@ def cmd_stop_consult(args: argparse.Namespace) -> None:
 def cmd_stop(args: argparse.Namespace) -> None:
     base = state_dir(args.state_dir)
     registry = load_registry(base)
-    worker = registry.get("workers", {}).get(safe_name(args.name))
+    workers = registry.get("workers", {})
+    worker = workers.get(args.name)
+    if not worker:
+        worker = workers.get(safe_name(args.name))
     if not worker:
         raise SystemExit(f"unknown worker: {args.name}")
     target = f"{worker['session']}:{worker['window']}"
@@ -3858,7 +3950,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_coord.add_argument("--target", default="auto", help="Coordinator tmux target, as SESSION:WINDOW.PANE. Use auto inside tmux.")
     register_coord.add_argument("--cwd", default=os.getcwd(), help="Working directory for recovered coordinator sessions.")
     register_coord.add_argument("--mission", help="Optional mission update written into COORDINATOR_SCHEDULE.md.")
-    register_coord.add_argument("--restart-window-prefix", default="main-recovered", help="Suffix for recovered main coordinator tmux sessions; default creates cw-main-recovered-... with the cw namespace.")
+    register_coord.add_argument("--restart-window-prefix", default="main-recovered", help="Suffix for an explicitly requested missing-target replacement session.")
     register_coord.add_argument("--allow-missing", action="store_true", help="Allow registering a target not currently present; intended for tests/pre-registration.")
     register_coord.add_argument("--model", help=f"Codex model for recovered coordinators. Default best model: {DEFAULT_WORKER_MODEL}.")
     register_coord.add_argument("--reasoning-effort", help=f"Codex reasoning effort for recovered coordinators. Default best effort: {DEFAULT_WORKER_REASONING}.")
@@ -3869,15 +3961,16 @@ def build_parser() -> argparse.ArgumentParser:
     register_coord.add_argument("--search", action="store_true")
     register_coord.set_defaults(func=cmd_register_coordinator)
 
-    recover_coord = sub.add_parser("recover-coordinator", help="Launch a new main coordinator Codex from durable worker state.")
-    recover_coord.add_argument("--old-target", help="Old coordinator tmux target to record and optionally kill.")
+    recover_coord = sub.add_parser("recover-coordinator", help="Recover the main coordinator in its registered pane; missing-target replacement requires --new-target.")
+    recover_coord.add_argument("--old-target", help="Expected old coordinator target; must match the registered target when one exists.")
     recover_coord.add_argument("--cwd", help="Working directory for the recovered coordinator; defaults to registered coordinator cwd.")
-    recover_coord.add_argument("--window", help="Explicit recovered coordinator tmux window name inside the recovered session.")
+    recover_coord.add_argument("--window", help="Explicit replacement window name; used only with --new-target after the old target is absent.")
     recover_coord.add_argument("--reason", default="manual-recovery")
-    recover_coord.add_argument("--kill-old", action="store_true", help="Kill the old coordinator pane after preparing the recovery prompt.")
-    recover_coord.add_argument("--force", action="store_true", help="Replace an existing recovered coordinator window with the same name.")
+    recover_coord.add_argument("--new-target", action="store_true", help="Explicitly allow a replacement target only when the registered/old target is confirmed absent.")
+    recover_coord.add_argument("--kill-old", action="store_true", help="Deprecated compatibility flag; present targets are always replaced in place with respawn-pane -k.")
+    recover_coord.add_argument("--force", action="store_true", help="Replace a colliding replacement target name when using --new-target.")
     recover_coord.add_argument("--startup-wait", type=int, default=8)
-    recover_coord.add_argument("--dry-run", action="store_true", help="Write recovery prompt/handoff and print the planned launch without starting Codex.")
+    recover_coord.add_argument("--dry-run", action="store_true", help="Write recovery prompt/handoff and print the planned recovery without starting Codex.")
     recover_coord.add_argument("--model", help=f"Codex model for the recovered coordinator. Default best model: {DEFAULT_WORKER_MODEL}.")
     recover_coord.add_argument("--reasoning-effort", help=f"Codex reasoning effort. Default best effort: {DEFAULT_WORKER_REASONING}.")
     recover_coord.add_argument("--no-best-model", action="store_true", help="Do not apply default best model/reasoning when no explicit/registered model exists.")
@@ -4028,9 +4121,9 @@ def build_parser() -> argparse.ArgumentParser:
     start_health.add_argument("--observe-target", action="append", help="Extra target to observe without auto-recovery, as NAME=TMUX_TARGET.")
     start_health.add_argument("--no-workers", action="store_true", help="Do not monitor workers from workers.json.")
     start_health.add_argument("--no-coordinator", action="store_true", help="Do not monitor the registered main coordinator target.")
-    start_health.add_argument("--restart-main-on-context-full", action="store_true", help="When the registered coordinator hits context-window exhaustion, launch a recovered coordinator from durable state.")
-    start_health.add_argument("--restart-main-when-missing", action="store_true", help="When the registered coordinator target disappears, launch a recovered coordinator from durable state.")
-    start_health.add_argument("--keep-old-main", action="store_true", help="Do not kill the old coordinator pane when auto-recovering the main coordinator.")
+    start_health.add_argument("--restart-main-on-context-full", action="store_true", help="When the registered coordinator exhausts context, respawn it in place at the exact registered target.")
+    start_health.add_argument("--restart-main-when-missing", action="store_true", help="Explicitly allow a new coordinator target only after the registered target disappears.")
+    start_health.add_argument("--keep-old-main", action="store_true", help="Deprecated no-op; stable-target recovery never keeps a second live main coordinator.")
     start_health.add_argument("--dry-run", action="store_true", help="Detect and log recovery actions without sending prompts.")
     start_health.add_argument("--escape-after", action="store_true", help="Send Escape after submitting a recovery prompt.")
     start_health.add_argument("--recovery-prompt", help="Override the default recovery prompt sent to stuck interactive Codex panes.")

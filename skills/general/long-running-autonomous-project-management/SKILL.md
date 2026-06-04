@@ -146,7 +146,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
    - expected completion report
 9. Maintain `.codex/tmux-workers/COORDINATOR_CONTEXT_PACK.md` and `.codex/tmux-workers/COORDINATOR_MEMORY.md` as the coordinator's short working memory. The coordinator should refresh and read these before routine checkpoints instead of reloading schedule/collect/capture output into chat context.
 10. Maintain `.codex/tmux-workers/COORDINATOR_SCHEDULE.md` as the user-auditable control document for starts, stops, task assignment, branch-manager hierarchy, peer messages, scheduling decisions, and results.
-11. Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` fresh as the restart handoff for a new main coordinator. It must be sufficient for a new thread to find previous workers, branch managers, jobs, reports, resources, blockers, constraints, and next checkpoints.
+11. Keep `.codex/tmux-workers/COORDINATOR_RECOVERY.md` fresh as the restart handoff for a recovered main coordinator. It must be sufficient for a fresh thread in the same stable tmux pane, or an explicitly authorized missing-target replacement, to find previous workers, branch managers, jobs, reports, resources, blockers, constraints, and next checkpoints.
 12. Keep `.codex/tmux-workers/consult/CONSULT_CONTEXT.md` fresh so the consultation worker can answer user questions without interrupting the coordinator.
 13. Keep the coordinator on the critical path while workers run, and keep the coordinator context lean:
    - prefer `compact-memory --print --context-pack`, `compact-memory --print`, `list`, `jobs`, and `progress --lines 20`;
@@ -158,7 +158,7 @@ Skip or postpone this layer only when the user explicitly opts out, the environm
 15. Stop stale, duplicate, failed, or superseded workers instead of letting old tmux sessions or targets accumulate.
 16. Never run the supervisor infinite loop directly in the coordinator; only `start-supervisor` may run the long-lived loop, and it must do so inside tmux.
 17. When a busy interactive worker must be redirected immediately, use `tmux-codex-parallel-workers interrupt-send`; it submits the new message first, then sends `Escape` so Codex switches to the queued instruction.
-18. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. If the main Codex itself is registered inside tmux, use `--restart-main-on-context-full` so the health supervisor launches `recover-coordinator` when the old coordinator exhausts its context window. Add `--restart-main-when-missing` only when coordinator-wide constraints explicitly authorize replacement of a missing coordinator target.
+18. For long-lived autonomous operation, start `tmux-codex-parallel-workers start-health-supervisor` after the worker layer is initialized. If the main Codex itself is registered inside tmux, use `--restart-main-on-context-full` so the health supervisor runs `recover-coordinator` in place at the exact registered `SESSION:WINDOW.PANE` target when the old thread exhausts its context window. Add `--restart-main-when-missing` only when coordinator-wide constraints explicitly authorize a new target after the registered target is confirmed absent. Present targets must never drift into a `*-main-recovered-*` replacement session.
 19. Use the coordinator as the control plane:
    - decide which branch is worth running;
    - cap GPU/CPU/IO usage;
