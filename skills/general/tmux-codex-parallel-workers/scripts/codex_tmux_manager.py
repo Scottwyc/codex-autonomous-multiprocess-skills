@@ -33,9 +33,9 @@ TUI_LOG_RESERVED_NAMES = {"supervisor.log", "health-supervisor.log"}
 REGISTRY_COMPACT_MAX_BYTES = 1_000_000
 REGISTRY_COMPACT_WORKER_THRESHOLD = 128
 REGISTRY_RECENT_TERMINAL_LIMIT = 32
-SCHEDULE_RECENT_TERMINAL_LIMIT = 12
-CONSULT_RECENT_TERMINAL_LIMIT = 8
-HANDOFF_RECENT_TERMINAL_LIMIT = 8
+SCHEDULE_RECENT_TERMINAL_LIMIT = 6
+CONSULT_RECENT_TERMINAL_LIMIT = 4
+HANDOFF_RECENT_TERMINAL_LIMIT = 4
 TERMINAL_WORKER_STATES = {"stopped", "completed", "failed"}
 
 
@@ -886,17 +886,15 @@ def render_coordinator_memory(
     reason: str = "refresh",
     progress_lines: int = 5,
     report_lines: int = 5,
-    event_limit: int = 14,
-    peer_limit: int = 10,
-    memory_event_limit: int = 12,
+    event_limit: int = 8,
+    peer_limit: int = 6,
+    memory_event_limit: int = 8,
 ) -> str:
     workers = registry.get("workers", {})
     coordinator = registry.get("coordinator") or {}
     mission = registry.get("mission", "未设置")
     session = registry.get("session", DEFAULT_SESSION)
     active_rows: list[list[str]] = []
-    resource_rows: list[list[str]] = []
-    path_rows: list[list[str]] = []
     for name, worker in sorted(workers.items()):
         state = effective_state(worker, session)
         if state in TERMINAL_WORKER_STATES:
@@ -911,18 +909,6 @@ def render_coordinator_memory(
                 worker_latest_summary(worker, progress_lines=progress_lines, report_lines=report_lines, limit=220),
             ]
         )
-        resources = ", ".join(worker.get("resources", [])) or "-"
-        owned = ", ".join(worker.get("owned_paths", [])) or "-"
-        resource_rows.append([name, resources, owned])
-        path_rows.append(
-            [
-                name,
-                worker.get("progress_file", "-"),
-                worker.get("report_file", "-"),
-                worker.get("jobs_file", "-"),
-            ]
-        )
-
     memory_events = load_memory_events(base, memory_event_limit)
     schedule_events = load_schedule_events(base, event_limit)
     peer_messages = load_peer_messages(base, peer_limit)
@@ -1006,13 +992,16 @@ def render_coordinator_memory(
     else:
         lines.append("暂无 worker 横向消息。")
 
-    lines.extend(["", "## Resource And Ownership Snapshot", ""])
-    lines.append(markdown_table(["Worker", "资源", "Owned paths"], resource_rows) if resource_rows else "暂无资源声明。")
-
     lines.extend(["", "## Unified Constraints Excerpt", "", "```text", constraints_excerpt(base, 28), "```"])
 
     lines.extend(["", "## Evidence Pointers", ""])
-    lines.append(markdown_table(["Worker", "Progress", "Report", "Jobs"], path_rows) if path_rows else "暂无 worker evidence。")
+    lines.extend(
+        [
+            f"- Current registry: `{registry_path(base)}`",
+            f"- Worker progress/report/jobs: use `list`, `progress <worker> --lines 20`, and `jobs`; load exact paths from the registry only when needed.",
+            f"- Full history: `{schedule_events_path(base)}`, `{peer_messages_path(base)}`, worker reports, and timestamped archives.",
+        ]
+    )
 
     lines.extend(
         [
@@ -1149,8 +1138,8 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
         for name, worker, state in recent_terminal_workers
     ]
 
-    events = load_schedule_events(base, 30)
-    peer_messages = load_peer_messages(base, 20)
+    events = load_schedule_events(base, 16)
+    peer_messages = load_peer_messages(base, 10)
     lines = [
         "# Coordinator Recovery Handoff",
         "",
@@ -1210,21 +1199,6 @@ def render_coordinator_handoff(base: Path, registry: dict[str, Any], reason: str
     lines.append(markdown_table(["Worker", "状态", "类型", "上级", "模式", "tmux", "资源", "任务摘要"], rows) if rows else "暂无 worker。")
     lines.extend(["", "## Recent Terminal Workers", ""])
     lines.append(markdown_table(["Worker", "状态", "类型", "Updated", "摘要"], terminal_rows) if terminal_rows else "暂无近期 terminal worker。")
-    lines.extend(["", "## Current Worker Key Files", ""])
-    for name, worker, _ in current_workers:
-        lines.extend(
-            [
-                f"### {name}",
-                f"- workplan: `{worker.get('workplan_file', '-')}`",
-                f"- progress: `{worker.get('progress_file', '-')}`",
-                f"- report: `{worker.get('report_file', '-')}`",
-                f"- jobs: `{worker.get('jobs_file', '-')}`",
-                f"- status: `{worker.get('status_file', '-')}`",
-                f"- log: `{worker.get('log_file', '-')}`",
-                f"- captures: `{base / 'captures' / name}`",
-                "",
-            ]
-        )
     lines.extend(
         [
             "## Coordinator Memory Files",
@@ -1680,7 +1654,6 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
     )
     current_rows = []
     for name, worker, status in current_workers:
-        task = extract_markdown_section(Path(worker.get("workplan_file", "")), "Task", 180)
         current_rows.append(
             [
                 name,
@@ -1689,11 +1662,11 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
                 worker.get("parent_worker") or "main",
                 f"{worker.get('session', session)}:{worker.get('window', '-')}",
                 ", ".join(worker.get("resources", [])) or "-",
-                one_line(task, 120),
+                one_line(worker_latest_summary(worker, progress_lines=3, report_lines=3, limit=140), 140),
             ]
         )
     lines.extend(["## 当前 Worker", ""])
-    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "tmux", "资源", "任务摘要"], current_rows) if current_rows else "暂无当前 worker。")
+    lines.append(markdown_table(["Worker", "状态", "类型", "上级", "tmux", "资源", "最新摘要"], current_rows) if current_rows else "暂无当前 worker。")
     lines.append("")
 
     recent_rows = [
@@ -1716,46 +1689,12 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
             "",
             f"> 当前状态注册表保存在 `{registry_path(base)}`；完整历史快照保存在 `{registry_archive_dir(base)}`，并由 `{schedule_events_path(base)}` 和各 worker report 补充审计证据。",
             "",
-            "## 当前 Worker 明细",
-            "",
-        ]
-    )
-    for name, worker, status in current_workers:
-        status_data = read_status_file(worker) or {}
-        jobs = load_jobs(jobs_path_for(base, worker), name).get("jobs", [])
-        progress_file = Path(worker.get("progress_file", ""))
-        report_file = Path(worker.get("report_file", ""))
-        workplan_file = Path(worker.get("workplan_file", ""))
-        lines.extend(
-            [
-                f"### {name}",
-                "",
-                f"- 状态：`{status}`",
-                f"- 类型/上级：`{worker.get('worker_kind', 'standard')}` / `{worker.get('parent_worker') or 'main-coordinator'}`",
-                f"- tmux：`{worker.get('session', session)}:{worker.get('window', '-')}`",
-                f"- resources：{', '.join(worker.get('resources', [])) or '-'}",
-                f"- owned paths：{', '.join(worker.get('owned_paths', [])) or '-'}",
-                f"- workplan：`{workplan_file}`",
-                f"- progress：`{progress_file}`",
-                f"- report：`{report_file}`",
-                f"- jobs：`{worker.get('jobs_file', '-')}`",
-                f"- 当前任务摘要：{extract_markdown_section(workplan_file, 'Task', 260)}",
-                f"- 最新进展/报告摘要：{worker_latest_summary(worker, progress_lines=4, report_lines=4, limit=360)}",
-            ]
-        )
-        if status_data.get("stalled_seconds") is not None:
-            lines.append(f"- stalled seconds：{status_data.get('stalled_seconds')}")
-        if jobs:
-            lines.append("- 后台 jobs：" + "；".join(one_line(job_line(job), 220) for job in jobs[:8]))
-        lines.append("")
-    lines.extend(
-        [
-            "> Schedule 不再为每个 worker 嵌入完整 progress/report、任务正文或重复 Git status/diff。需要深挖时按证据路径读取；Git 审查使用 `collect` 或显式 `git status/diff`。",
+            "当前 worker 的 workplan/progress/report/jobs/status/log/capture 路径从 `list` 或当前注册表按需读取；本调度总览不重复展开逐-worker 文件块。",
             "",
         ]
     )
 
-    events = load_schedule_events(base, 24)
+    events = load_schedule_events(base, 12)
     lines.extend(["## 调度事件日志", ""])
     if events:
         event_rows = [
@@ -1771,7 +1710,7 @@ def render_schedule_doc(base: Path, registry: dict[str, Any]) -> str:
     else:
         lines.append("暂无调度事件。")
 
-    peer_messages = load_peer_messages(base, 12)
+    peer_messages = load_peer_messages(base, 8)
     lines.extend(["", "## Worker 横向消息", ""])
     if peer_messages:
         peer_rows = [
@@ -1872,30 +1811,16 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
     ]
     lines.extend(["", "## 近期终止 Worker", ""])
     lines.append(markdown_table(["Worker", "状态", "最近更新时间", "报告"], recent_rows) if recent_rows else "暂无近期终止 worker。")
-    lines.extend(["", "## 当前 Worker 关键文件", ""])
-    for name, worker, _ in current_workers:
-        lines.extend(
-            [
-                f"### {name}",
-                f"- workplan：`{worker.get('workplan_file', '-')}`",
-                f"- progress：`{worker.get('progress_file', '-')}`",
-                f"- report：`{worker.get('report_file', '-')}`",
-                f"- jobs：`{worker.get('jobs_file', '-')}`",
-                f"- status：`{worker.get('status_file', '-')}`",
-                f"- log：`{worker.get('log_file', '-')}`",
-                f"- captures：`{base / 'captures' / name}`",
-                "",
-            ]
-        )
     lines.extend(
         [
-            f"当前 worker 注册表：`{registry_path(base)}`；完整历史快照：`{registry_archive_dir(base)}`。当前咨询上下文不展开全部终止 worker。",
+            "",
+            f"当前 worker 证据路径按需从 `list` / `progress` / `jobs` 或注册表 `{registry_path(base)}` 读取；完整历史快照位于 `{registry_archive_dir(base)}`。",
             "",
             "## 最近调度事件",
             "",
         ]
     )
-    events = load_schedule_events(base, 18)
+    events = load_schedule_events(base, 10)
     if events:
         lines.append(
             markdown_table(
@@ -1905,7 +1830,7 @@ def render_consult_context(base: Path, registry: dict[str, Any]) -> str:
         )
     else:
         lines.append("暂无调度事件。")
-    lines.extend(["", "## 主进程短上下文摘录", "", "```text", tail_text(coordinator_context_pack_path(base), 60), "```", ""])
+    lines.extend(["", "## 主进程短上下文摘录", "", "```text", tail_text(coordinator_context_pack_path(base), 40), "```", ""])
     return "\n".join(lines)
 
 
