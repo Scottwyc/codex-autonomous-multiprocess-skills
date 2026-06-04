@@ -424,6 +424,30 @@ class IsolatedTmuxRecoverySimulationTests(unittest.TestCase):
             self.assertTrue(health.target_alive(target))
             self.assertTrue(manager.tmux_target_present(target))
 
+    def test_start_target_locks_long_lived_window_and_tolerates_short_lived_exec(self) -> None:
+        long_session = "audit-managed-long"
+        long_target = f"{long_session}:codex"
+        short_session = "audit-managed-short"
+
+        with mock.patch.object(manager, "tmux", self.tmux):
+            manager.start_tmux_target(
+                long_session,
+                "codex",
+                Path(self.temp.name),
+                "exec sleep 60",
+                independent_session=True,
+            )
+            manager.start_tmux_target(
+                short_session,
+                "exec",
+                Path(self.temp.name),
+                "exit 0",
+                independent_session=True,
+            )
+
+        self.assertEqual(self.window_option(long_target, "automatic-rename"), "off")
+        self.assertEqual(self.window_option(long_target, "allow-rename"), "off")
+
     def test_missing_target_fails_closed_then_explicitly_allocates_one_replacement(self) -> None:
         old_session = "audit-main-missing"
         old_target = f"{old_session}:main.0"

@@ -1294,11 +1294,11 @@ def start_tmux_target(session: str, window: str, cwd: Path, command: str, *, ind
     target = f"{session}:{window}"
     if independent_session and not session_exists(session):
         tmux("new-session", "-d", "-s", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
-        stabilize_tmux_target_window(target)
+        stabilize_tmux_target_window(target, required=False)
         return
     ensure_session(session, cwd)
     new_tmux_window(session, window, cwd, command)
-    stabilize_tmux_target_window(target)
+    stabilize_tmux_target_window(target, required=False)
 
 
 def stop_tmux_target(session: str, window: str, *, independent_session: bool) -> subprocess.CompletedProcess[str]:
@@ -1354,12 +1354,17 @@ def tmux_target_identity(target: str) -> tuple[str, str, str] | None:
     return parts[0], parts[1], parts[2]
 
 
-def stabilize_tmux_target_window(target: str) -> None:
+def stabilize_tmux_target_window(target: str, *, required: bool = True) -> bool:
     """Keep manager-owned targets addressable by their registered window name."""
     if tmux_target_identity(target) is None:
-        raise RuntimeError(f"cannot stabilize missing tmux target: {target}")
-    tmux("set-window-option", "-t", target, "automatic-rename", "off")
-    tmux("set-window-option", "-t", target, "allow-rename", "off")
+        if required:
+            raise RuntimeError(f"cannot stabilize missing tmux target: {target}")
+        return False
+    automatic = tmux("set-window-option", "-t", target, "automatic-rename", "off", check=False)
+    application = tmux("set-window-option", "-t", target, "allow-rename", "off", check=False)
+    if required and (automatic.returncode != 0 or application.returncode != 0):
+        raise RuntimeError(f"cannot lock tmux target window name: {target}")
+    return automatic.returncode == 0 and application.returncode == 0
 
 
 def respawn_tmux_pane(target: str, cwd: Path, command: str) -> None:
