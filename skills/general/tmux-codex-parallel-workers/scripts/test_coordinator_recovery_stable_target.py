@@ -344,6 +344,10 @@ class IsolatedTmuxRecoverySimulationTests(unittest.TestCase):
             return []
         return sorted(line for line in result.stdout.splitlines() if line)
 
+    def window_option(self, target: str, option: str) -> str:
+        result = self.tmux("show-window-options", "-v", "-t", target, option)
+        return result.stdout.strip()
+
     @contextlib.contextmanager
     def patched_manager_runtime(self):
         with (
@@ -372,6 +376,44 @@ class IsolatedTmuxRecoverySimulationTests(unittest.TestCase):
         self.assertEqual(registry["coordinator"]["target"], target)
         self.assertEqual(registry["coordinator"]["last_recovery_policy"], "in-place")
         self.assertEqual(registry["coordinator"]["previous_targets"], [])
+        self.assertEqual(self.window_option(target, "automatic-rename"), "off")
+        self.assertEqual(self.window_option(target, "allow-rename"), "off")
+
+    def test_register_coordinator_locks_window_name_against_tmux_auto_rename(self) -> None:
+        session = "audit-register-stable"
+        target = f"{session}:0.0"
+        self.tmux("new-session", "-d", "-s", session, "-n", "node", "-c", self.temp.name, "bash", "-lc", "exec sleep 60")
+        self.tmux("set-window-option", "-t", target, "automatic-rename", "on")
+        self.assertEqual(self.window_option(target, "automatic-rename"), "on")
+        args = argparse.Namespace(
+            state_dir=str(self.base),
+            session="audit-ns",
+            shared_session=False,
+            target=target,
+            cwd=self.temp.name,
+            mission="stable coordinator registration",
+            restart_window_prefix="main-recovered",
+            allow_missing=False,
+            model=None,
+            reasoning_effort=None,
+            no_best_model=False,
+            profile=None,
+            sandbox="danger-full-access",
+            approval="never",
+            search=False,
+        )
+
+        with (
+            mock.patch.object(manager, "tmux", self.tmux),
+            mock.patch.object(manager, "require_binary"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            manager.cmd_register_coordinator(args)
+
+        self.assertEqual(self.window_option(target, "automatic-rename"), "off")
+        self.assertEqual(self.window_option(target, "allow-rename"), "off")
+        registry = manager.load_registry(self.base)
+        self.assertEqual(registry["coordinator"]["target"], target)
 
     def test_health_target_alive_accepts_exact_session_window_pane(self) -> None:
         session = "audit-health-exact-pane"

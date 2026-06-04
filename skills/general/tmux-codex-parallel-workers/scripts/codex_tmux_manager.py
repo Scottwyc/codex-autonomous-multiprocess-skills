@@ -1291,11 +1291,14 @@ def new_tmux_window(session: str, window: str, cwd: Path, command: str) -> None:
 
 
 def start_tmux_target(session: str, window: str, cwd: Path, command: str, *, independent_session: bool) -> None:
+    target = f"{session}:{window}"
     if independent_session and not session_exists(session):
         tmux("new-session", "-d", "-s", session, "-n", window, "-c", str(cwd), "bash", "-lc", command)
+        stabilize_tmux_target_window(target)
         return
     ensure_session(session, cwd)
     new_tmux_window(session, window, cwd, command)
+    stabilize_tmux_target_window(target)
 
 
 def stop_tmux_target(session: str, window: str, *, independent_session: bool) -> subprocess.CompletedProcess[str]:
@@ -1351,8 +1354,18 @@ def tmux_target_identity(target: str) -> tuple[str, str, str] | None:
     return parts[0], parts[1], parts[2]
 
 
+def stabilize_tmux_target_window(target: str) -> None:
+    """Keep manager-owned targets addressable by their registered window name."""
+    if tmux_target_identity(target) is None:
+        raise RuntimeError(f"cannot stabilize missing tmux target: {target}")
+    tmux("set-window-option", "-t", target, "automatic-rename", "off")
+    tmux("set-window-option", "-t", target, "allow-rename", "off")
+
+
 def respawn_tmux_pane(target: str, cwd: Path, command: str) -> None:
+    stabilize_tmux_target_window(target)
     tmux("respawn-pane", "-k", "-t", target, "-c", str(cwd), "bash", "-lc", command)
+    stabilize_tmux_target_window(target)
 
 
 def infer_current_tmux_target() -> str | None:
@@ -2455,6 +2468,8 @@ def cmd_register_coordinator(args: argparse.Namespace) -> None:
         raise SystemExit("No coordinator tmux target provided and current process is not inside tmux. Pass --target SESSION:WINDOW.PANE.")
     if not args.allow_missing and not tmux_target_present(target):
         raise SystemExit(f"coordinator target is not present: {target}; pass --allow-missing only for tests or pre-registration")
+    if tmux_target_present(target):
+        stabilize_tmux_target_window(target)
     model, reasoning_effort = resolve_model_settings(args)
     registry = load_registry(base)
     registry["session"] = args.session

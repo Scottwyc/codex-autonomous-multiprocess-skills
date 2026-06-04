@@ -492,6 +492,8 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/s
 
 如果是主进程窗口本身需要重开，应先确保已经 `register-coordinator`，再用 `recover-coordinator` 从 durable state 在原精确 pane 上原位恢复。只有注册 target 已确认不存在时，才显式使用 `recover-coordinator --new-target` 创建替代目标。
 
+`register-coordinator` 会将注册主窗口的 tmux `automatic-rename` 与 `allow-rename` 设为 `off`；manager 创建的 worker 窗口和原位 recover 也执行相同锁名。不要重新启用窗口自动/程序改名，否则同一个存活 pane 可能因窗口名漂移而被误判为 target 丢失，进而破坏通知和恢复路由。
+
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/general/tmux-codex-parallel-workers/scripts/codex_tmux_manager.py" \
   --state-dir .codex/tmux-workers \
